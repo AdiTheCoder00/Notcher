@@ -9,13 +9,19 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
 use base64::Engine;
-use windows::core::PCWSTR;
+use windows::core::{Interface, PCWSTR};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
     BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
 };
-use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
-use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+use windows::Win32::Storage::FileSystem::{FILE_FLAGS_AND_ATTRIBUTES, WIN32_FIND_DATAW};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
+    COINIT_APARTMENTTHREADED, STGM_READ,
+};
+use windows::Win32::UI::Shell::{
+    IShellLinkW, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, ShellLink,
+};
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo};
 
 /// A PNG data URL for the icon Windows shows for `target`, or `None` when the
@@ -53,7 +59,53 @@ pub fn png_data_urls(targets: &[std::path::PathBuf]) -> Vec<Option<String>> {
     icons
 }
 
+/// A `.lnk`'s target. The shell paints a shortcut arrow onto a link's own icon,
+/// so links are resolved first and the target's icon is used instead.
+fn shortcut_target(target: &Path) -> Option<std::path::PathBuf> {
+    if !target
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
+    {
+        return None;
+    }
+    // Safety: COM is initialised for the duration of this call, and the path
+    // returned is owned data, so nothing outlives the apartment.
+    unsafe {
+        let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let resolved = resolve_link(target);
+        if initialized {
+            CoUninitialize();
+        }
+        resolved
+    }
+}
+
+/// # Safety
+/// In the caller's apartment; `resolve_link` only borrows COM objects locally.
+unsafe fn resolve_link(target: &Path) -> Option<std::path::PathBuf> {
+    let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+    let file: IPersistFile = link.cast().ok()?;
+    let wide: Vec<u16> = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    file.Load(PCWSTR(wide.as_ptr()), STGM_READ).ok()?;
+    let mut buffer = [0u16; 1024];
+    let mut data = WIN32_FIND_DATAW::default();
+    link.GetPath(&mut buffer, &mut data, 0).ok()?;
+    let length = buffer.iter().position(|unit| *unit == 0).unwrap_or(0);
+    if length == 0 {
+        return None;
+    }
+    Some(std::path::PathBuf::from(String::from_utf16_lossy(
+        &buffer[..length],
+    )))
+}
+
 fn render(target: &Path) -> Option<Vec<u8>> {
+    let resolved = shortcut_target(target);
+    let target = resolved.as_deref().unwrap_or(target);
     let wide: Vec<u16> = target
         .as_os_str()
         .encode_wide()
@@ -249,5 +301,57 @@ mod tests {
             .expect("valid base64");
         assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
         assert!(bytes.len() > 200, "icon PNG looks empty");
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    fn collect_links(dir: &Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+        if depth > 4 || out.len() >= 10 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_links(&path, depth + 1, out);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn resolves_start_menu_shortcuts_to_their_target() {
+        let Some(start) = std::env::var_os("APPDATA")
+            .map(|dir| Path::new(&dir).join("Microsoft/Windows/Start Menu/Programs"))
+            .filter(|path| path.is_dir())
+        else {
+            return;
+        };
+
+        let mut links = Vec::new();
+        collect_links(&start, 0, &mut links);
+        if links.is_empty() {
+            return;
+        }
+
+        let resolved: Vec<_> = links
+            .iter()
+            .take(6)
+            .filter_map(|link| shortcut_target(link))
+            .collect();
+        assert!(
+            !resolved.is_empty(),
+            "no Start Menu shortcut resolved its target"
+        );
+        assert!(resolved.iter().all(|target| target.is_absolute()));
     }
 }

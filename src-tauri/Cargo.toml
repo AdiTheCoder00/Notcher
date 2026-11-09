@@ -1,6 +1,6 @@
 [package]
 name = "murmur"
-version = "0.1.2"
+version = "0.1.3"
 description = "Windows voice assistant: hold-to-talk dictation, circle-to-ask and voice scheduling"
 authors = ["Murmur"]
 edition = "2021"

@@ -12,10 +12,9 @@ function bytes(n: number) { return n >= 1073741824 ? `${(n / 1073741824).toFixed
 const DEFAULT_WEATHER_CITY = "Gorakhpur";
 
 export function WeatherPanel() {
-  const [city, setCity] = useState(
+  const [city] = useState(
     () => localStorage.getItem("murmur-weather-city") || DEFAULT_WEATHER_CITY,
   );
-  const [draft, setDraft] = useState(city);
   const [weather, setWeather] = useState<{temperature: number; code: number; name: string} | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -37,7 +36,7 @@ export function WeatherPanel() {
     return () => { abort.abort(); clearInterval(timer); };
   }, [city]);
   const description = !weather ? "" : weather.code === 0 ? "Clear" : weather.code <= 3 ? "Cloudy" : weather.code <= 48 ? "Foggy" : weather.code <= 67 ? "Rain" : weather.code <= 77 ? "Snow" : weather.code <= 82 ? "Showers" : "Stormy";
-  return <div className="cc-weather">{weather && <><span className="cc-weather-symbol">☀</span><strong>{Math.round(weather.temperature)}°C</strong><small>{description} · {weather.name}</small></>}<form onSubmit={e => {e.preventDefault(); const value = draft.trim(); setCity(value); if (value) localStorage.setItem("murmur-weather-city", value); else localStorage.removeItem("murmur-weather-city");}}><input value={draft} onChange={e => setDraft(e.target.value)} placeholder="Enter city" aria-label="Weather city" /><button type="submit" aria-label="Update weather">→</button></form>{error && <small role="alert">{error}</small>}</div>;
+  return <div className="cc-weather">{weather && <><span className="cc-weather-symbol">☀</span><strong>{Math.round(weather.temperature)}°C</strong><small>{description} · {weather.name}</small></>}{error && <small role="alert">{error}</small>}</div>;
 }
 
 export function StatsPanel() {

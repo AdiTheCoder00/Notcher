@@ -2628,15 +2628,12 @@ html[data-probe="1"] #root { width: 724px; height: 430px; }
 .cc-weather-symbol { color: #ffd141; font-size: 25px; }
 .cc-weather strong { font-size: 24px; }
 .cc-weather small { color: #aab1c0; font-size: 10px; }
-.cc-weather form { display: flex; width: 100%; }
-.cc-weather input { width: 100%; min-width: 0; padding: 5px; border: 0; border-radius: 5px; color: white; background: #2a2d38; font-size: 10px; }
-.cc-weather button { border: 0; color: #d0ad5e; background: transparent; cursor: pointer; }
 .cc-panel-title { font-size: 13px; }
 .cc-day span, .cc-next-task, .cc-clock small, .cc-weather small { font-size: 11px; }
 .cc-day strong { font-size: 12px; }
 .cc-toggle strong, .cc-track-copy strong { font-size: 13px; }
 .cc-toggle small, .cc-track-copy span { font-size: 11px; }
-.cc-weather input, .cc-todo-form input { font-size: 12px; }
+.cc-todo-form input { font-size: 12px; }
 .cc-clock { grid-row: auto; }
 .cc-calendar { grid-column: 2; grid-row: 1; }
 .cc-timer { grid-column: 2; grid-row: 2; }
