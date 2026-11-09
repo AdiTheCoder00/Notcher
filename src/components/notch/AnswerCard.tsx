@@ -1,8 +1,11 @@
 import { useCallback, useState } from "react";
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, isTauri } from "../../lib/ipc";
+import { MurmurMark } from "../Icons";
+import { ConfirmBubble } from "./ConfirmBubble";
+import { isPillAnswer } from "./pillAnswer";
 import { useDismissTimer } from "./useDismissTimer";
 
 const AUTO_DISMISS_MS = 20_000;
@@ -38,6 +41,33 @@ export function AnswerCard({ markdown, onDismiss }: Props) {
       setCopyFailed(true);
     }
   }, [markdown]);
+
+  // A short, single-line answer is one pill: text, a mark, and a check on copy.
+  if (isPillAnswer(markdown)) {
+    return (
+      <motion.button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          void copy();
+        }}
+        onPointerEnter={() => setPaused(true)}
+        onPointerLeave={() => setPaused(false)}
+        aria-label={copied ? "Answer copied" : `Copy answer: ${markdown}`}
+        className="notch-answer-pill"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        transition={{ duration: 0.14 }}
+      >
+        <span className="notch-answer-pill-mark" aria-hidden="true">
+          <MurmurMark size={15} />
+        </span>
+        <span className="notch-answer-pill-text">{markdown}</span>
+        <AnimatePresence>{copied ? <ConfirmBubble label="Answer copied" /> : null}</AnimatePresence>
+      </motion.button>
+    );
+  }
 
   return (
     <motion.div

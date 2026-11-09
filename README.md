@@ -304,6 +304,40 @@ the Rust names (`notch://state`, `audio://level`, `hotkeys://state`,
 `task://due`). `useRustEvent(name, handler)` subscribes on mount, always calls
 the latest handler, and is a no-op in a plain browser.
 
+## Updates
+
+Murmur updates itself from inside the app. **Updates** in the dashboard checks the newest
+published release, downloads the signed NSIS installer, and reopens Murmur when it finishes.
+Loadout, scheduled tasks and the API key live in `%APPDATA%\com.murmur.desktop`, so an update
+never asks for them again.
+
+The updater trusts one signing key. Its public half is `plugins.updater.pubkey` in
+`src-tauri/tauri.conf.json`; the private half was generated with
+
+```pwsh
+npx tauri signer generate -w .tauri/murmur.key
+```
+
+and is gitignored (`.tauri/`). Put it in the repository secrets before publishing:
+
+- `TAURI_SIGNING_PRIVATE_KEY` — the contents of `.tauri/murmur.key` (the key string, not a path)
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — only if the key was generated with a password
+
+### Publishing a release
+
+1. Bump `version` in `src-tauri/tauri.conf.json` (and `src-tauri/Cargo.toml`).
+2. Commit, then tag and push: `git tag v0.1.1` / `git push origin v0.1.1`.
+3. `.github/workflows/release.yml` builds the installers, signs the updater artifact and
+   publishes them with `latest.json` on the GitHub release.
+4. Installed copies offer the release on their next check in the Updates panel.
+
+`releases/latest/download/latest.json` only resolves for published, non-prerelease releases,
+so drafts stay invisible to the updater until they are published.
+
+Local release builds sign their updater artifacts too: export
+`TAURI_SIGNING_PRIVATE_KEY` (path or key string) before `npm run tauri build`, or the build
+stops with `createUpdaterArtifacts` asking for a key.
+
 ## Debug panel
 
 The settings window shows live state straight from the hook and the meter:

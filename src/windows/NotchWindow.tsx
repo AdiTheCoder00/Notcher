@@ -67,6 +67,19 @@ export default function NotchWindow() {
   // A save in the settings window restyles the notch and can change whether
   // its resting mark reacts to clicks or the wheel.
   useRustEvent(EVENTS.loadoutChanged, setLoadout);
+  // The dictation bubble advertises whichever chord actually starts dictation.
+  const dictationKeys = (() => {
+    const slot = loadout.hotkeys.bindings.find(
+      (entry) => entry.gesture === "dictation" && entry.enabled,
+    );
+    if (!slot) return ["Ctrl", "Win"];
+    return [
+      slot.ctrl ? "Ctrl" : null,
+      slot.shift ? "Shift" : null,
+      slot.alt ? "Alt" : null,
+      slot.win ? "Win" : null,
+    ].filter((key): key is string => key !== null);
+  })();
 
   // The notch is a second window, so it has to load the same Loadout to colour
   // itself and to know whether the resting mark is clickable.
@@ -189,7 +202,12 @@ export default function NotchWindow() {
                 payload.state === "idle" ? "notch-idle-shell cursor-pointer" : undefined
               }
             >
-              <NotchBar state={payload.state} text={payload.text} onDismiss={dismiss} />
+              <NotchBar
+                state={payload.state}
+                text={payload.text}
+                keys={dictationKeys}
+                onDismiss={dismiss}
+              />
             </Trigger>
           ) : null}
         </AnimatePresence>

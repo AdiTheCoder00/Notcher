@@ -6,6 +6,7 @@ import type {
   Loadout,
   PersonaPreset,
   ThemeMode,
+  ThemePalette,
   VoiceStyle,
 } from "../../lib/ipc";
 import { api, isTauri } from "../../lib/ipc";
@@ -54,6 +55,11 @@ const THEME_MODES: { value: ThemeMode; label: string }[] = [
   { value: "system", label: "System" },
   { value: "dark", label: "Dark" },
   { value: "light", label: "Light" },
+];
+
+const PALETTES: { value: ThemePalette; label: string; detail: string }[] = [
+  { value: "gold", label: "Gold", detail: "Office gold on charcoal" },
+  { value: "mist", label: "Mist", detail: "Cream bubbles, light-blue accent" },
 ];
 
 const ACCENTS = ["#d0ad5e", "#7c8cff", "#22d3ee", "#a855f7", "#f97316", "#10b981", "#f43f5e"];
@@ -811,6 +817,20 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
                     {mode.label}
                   </Chip>
                 ))}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {PALETTES.map((palette) => (
+                  <Chip
+                    key={palette.value}
+                    selected={loadout.theme.palette === palette.value}
+                    onClick={() => patch({ theme: { ...loadout.theme, palette: palette.value } })}
+                  >
+                    {palette.label}
+                  </Chip>
+                ))}
+                <span className="self-center text-[11px] text-muted">
+                  {PALETTES.find((entry) => entry.value === loadout.theme.palette)?.detail}
+                </span>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 {ACCENTS.map((accent) => (

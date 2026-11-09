@@ -11,6 +11,7 @@ import {
   type TaskUpdate,
 } from "../lib/ipc";
 import { ApiKeyCard } from "../components/ApiKeyCard";
+import { UpdateCard } from "../components/UpdateCard";
 import { TaskList } from "../components/TaskList";
 import { DebugPanel } from "../components/DebugPanel";
 import { KeyCombo } from "../components/Keycap";
@@ -21,6 +22,7 @@ import {
   AppsIcon,
   CheckIcon,
   ChevronRightIcon,
+  DownloadIcon,
   KeyboardIcon,
   MicIcon,
   MurmurMark,
@@ -57,6 +59,7 @@ const NAV_ITEMS = [
   { id: "hotkeys", label: "Shortcuts", icon: KeyboardIcon },
   { id: "scheduled", label: "Scheduled", icon: CheckIcon },
   { id: "diagnostics", label: "Diagnostics", icon: ChevronRightIcon },
+  { id: "updates", label: "Updates", icon: DownloadIcon },
   { id: "notch-preview", label: "Notch preview", icon: MurmurMark },
 ] as const;
 
@@ -551,6 +554,8 @@ export default function MainWindow() {
           <div id="diagnostics" className="dashboard-anchor">
             <DebugPanel bindings={bindings} />
           </div>
+
+          <UpdateCard />
 
           <section id="notch-preview" className="dashboard-surface dashboard-anchor">
             <div className="dashboard-section-heading">

@@ -30,7 +30,7 @@ export function defaultLoadout(): Loadout {
     },
     persona: { preset: "assistant", name: "Murmur", instructions: "" },
     apps: { pinned: ["Spotify", "Notepad", "Settings"] },
-    theme: { mode: "system", accent: "#d0ad5e" },
+    theme: { mode: "system", accent: "#d0ad5e", palette: "gold" },
   };
 }
 
@@ -65,6 +65,7 @@ export function applyTheme(theme: ThemeSettings): void {
   }, 0);
   root.style.setProperty("--color-on-accent", luminance > 0.179 ? "#000000" : "#ffffff");
   root.style.setProperty("--notch-accent", theme.accent);
+  root.dataset.palette = theme.palette === "mist" ? "mist" : "gold";
   paint();
 
   if (theme.mode === "system") {

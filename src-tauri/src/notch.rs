@@ -33,12 +33,25 @@ pub const CONTROL_EVENT: &str = "control://state";
 /// content.
 const IDLE_WIDTH: f64 = 200.0;
 const IDLE_HEIGHT: f64 = 32.0;
-const LISTENING_WIDTH: f64 = 396.0;
-const LISTENING_HEIGHT: f64 = 76.0;
+/// The dictation bubble: a card, a gap, then the round mic badge.
+const LISTENING_WIDTH: f64 = 640.0;
+const LISTENING_HEIGHT: f64 = 136.0;
 const THINKING_WIDTH: f64 = 292.0;
 const THINKING_HEIGHT: f64 = 68.0;
 const ANSWER_WIDTH: f64 = 560.0;
 const ANSWER_HEIGHT: f64 = 300.0;
+/// A short, single-line answer packs into one pill instead of the full card.
+const ANSWER_PILL_WIDTH: f64 = 480.0;
+const ANSWER_PILL_HEIGHT: f64 = 64.0;
+
+/// Must match `isPillAnswer` in `src/components/notch/AnswerCard.tsx`.
+pub fn is_pill_answer(text: Option<&str>) -> bool {
+    text.map(|text| {
+        let trimmed = text.trim();
+        !trimmed.is_empty() && trimmed.chars().count() <= 90 && !trimmed.contains('\n')
+    })
+    .unwrap_or(false)
+}
 const ERROR_WIDTH: f64 = 448.0;
 const ERROR_HEIGHT: f64 = 112.0;
 /// Window width minus body width: a 12 px wing on each side of the panel, which
@@ -404,7 +417,11 @@ fn update_inner(app: &AppHandle, state: NotchState, text: Option<&str>) -> Resul
     // The panel keeps its size while it is open; a background state update must
     // not shrink the window underneath it.
     if !control {
-        let (width, height) = state.size();
+        let (width, height) = if state == NotchState::Answer && is_pill_answer(text) {
+            (ANSWER_PILL_WIDTH, ANSWER_PILL_HEIGHT)
+        } else {
+            state.size()
+        };
         if let Err(err) = resize(app, width, height) {
             eprintln!("[notch] could not resize the overlay: {err:#}");
         }
@@ -464,6 +481,15 @@ mod tests {
         assert!(super::should_restore_foreground(1, 1));
         assert!(!super::should_restore_foreground(1, 2));
         assert!(!super::should_restore_foreground(1, 0));
+    }
+
+    #[test]
+    fn only_short_single_line_answers_use_the_pill() {
+        assert!(super::is_pill_answer(Some("Here are boxing gloves.")));
+        assert!(!super::is_pill_answer(Some("Two lines\nof answer")));
+        assert!(!super::is_pill_answer(Some(&"x".repeat(91))));
+        assert!(!super::is_pill_answer(Some("   ")));
+        assert!(!super::is_pill_answer(None));
     }
 
     #[test]

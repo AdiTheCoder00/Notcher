@@ -133,6 +133,7 @@ impl Loadout {
         if !is_hex_color(&self.theme.accent) {
             self.theme.accent = DEFAULT_ACCENT.to_string();
         }
+        self.theme.palette = normalize_choice(&self.theme.palette, &["gold", "mist"], "gold");
 
         self
     }
@@ -336,6 +337,13 @@ pub struct ThemeSettings {
     pub mode: String,
     /// #rrggbb accent used by both windows.
     pub accent: String,
+    /// gold | mist — the overlay's tone. Older loadouts deserialize as gold.
+    #[serde(default = "default_palette")]
+    pub palette: String,
+}
+
+fn default_palette() -> String {
+    "gold".to_string()
 }
 
 impl Default for ThemeSettings {
@@ -343,6 +351,7 @@ impl Default for ThemeSettings {
         Self {
             mode: "system".to_string(),
             accent: DEFAULT_ACCENT.to_string(),
+            palette: default_palette(),
         }
     }
 }
@@ -488,6 +497,7 @@ mod tests {
             theme: ThemeSettings {
                 mode: "neon".into(),
                 accent: "red".into(),
+                palette: "neon".into(),
             },
             apps: AppSettings {
                 pinned: (0..40).map(|index| format!("App {index}")).collect(),
@@ -500,6 +510,7 @@ mod tests {
         assert_eq!(noisy.voice.custom.chars().count(), 600);
         assert_eq!(noisy.theme.mode, "system");
         assert_eq!(noisy.theme.accent, DEFAULT_ACCENT);
+        assert_eq!(noisy.theme.palette, "gold");
         assert_eq!(noisy.apps.pinned.len(), 12);
     }
 }

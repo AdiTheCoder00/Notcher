@@ -8,8 +8,13 @@ type ShelfItem = { path: string; pinned: boolean };
 function load<T>(key: string, fallback: T): T { try { return JSON.parse(localStorage.getItem(key) || "null") ?? fallback; } catch { return fallback; } }
 function bytes(n: number) { return n >= 1073741824 ? `${(n / 1073741824).toFixed(1)} GB` : n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(0)} KB` : `${n} B`; }
 
+/** Shown until the user types a city of their own. */
+const DEFAULT_WEATHER_CITY = "Gorakhpur";
+
 export function WeatherPanel() {
-  const [city, setCity] = useState(() => localStorage.getItem("murmur-weather-city") || "");
+  const [city, setCity] = useState(
+    () => localStorage.getItem("murmur-weather-city") || DEFAULT_WEATHER_CITY,
+  );
   const [draft, setDraft] = useState(city);
   const [weather, setWeather] = useState<{temperature: number; code: number; name: string} | null>(null);
   const [error, setError] = useState("");

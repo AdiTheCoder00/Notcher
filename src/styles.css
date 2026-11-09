@@ -134,7 +134,7 @@ html[data-window="notch"] {
   transform: scaleX(-1);
 }
 
-.notch-pill:not(.notch-pill--idle) {
+.notch-pill:not(.notch-pill--idle):not(.notch-pill--listening) {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), var(--notch-shadow) !important;
 }
 
@@ -2696,3 +2696,243 @@ html[data-probe="1"] #root { width: 724px; height: 430px; }
 .cc-todo-form { display: flex; gap: 5px; padding: 6px; border: 1px dashed #3c404c; border-radius: 12px; }
 .cc-todo-form input { flex: 1; min-width: 0; padding: 0 6px; border: 0; outline: 0; background: transparent; color: white; font-size: 11px; }
 .cc-todo-form button { width: 30px; height: 30px; border: 0; border-radius: 10px; color: #211c10; background: #d0ad5e; cursor: pointer; }
+
+/* In-app updater */
+.dashboard-update-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.dashboard-update-mark {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  place-items: center;
+  border: 1px solid var(--dashboard-border);
+  border-radius: var(--dashboard-radius-sm);
+  color: var(--dashboard-accent-ink);
+  background: var(--dashboard-surface-raised);
+}
+
+.dashboard-update-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 240px;
+  gap: 3px;
+}
+
+.dashboard-update-copy strong {
+  color: var(--dashboard-text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.dashboard-update-copy span {
+  color: var(--dashboard-muted);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.dashboard-update-progress {
+  height: 4px;
+  overflow: hidden;
+  margin-top: 14px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--dashboard-text) 12%, var(--dashboard-surface));
+}
+
+.dashboard-update-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--dashboard-accent-ink);
+  transition: width 200ms ease;
+}
+
+.dashboard-update-notes {
+  overflow: auto;
+  max-height: 150px;
+  margin: 14px 0 0;
+  border: 1px solid var(--dashboard-border);
+  border-radius: var(--dashboard-radius-sm);
+  padding: 10px 12px;
+  color: var(--dashboard-muted);
+  background: var(--dashboard-surface-raised);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+/* ---------------------------------------------------------------- */
+/* Notch overlay kit: dictation bubble, answer pill, confirm bubble  */
+/* ---------------------------------------------------------------- */
+
+html[data-window="notch"] {
+  --notch-bubble: var(--notch-surface);
+  --notch-bubble-text: var(--notch-text);
+  --notch-keycap-bg: color-mix(in oklab, var(--notch-text) 14%, transparent);
+  --notch-keycap-text: var(--notch-text);
+  --notch-check: #7ee787;
+}
+
+.notch-dictation-row {
+  width: 638px;
+  max-width: calc(100vw - 2px);
+}
+
+.notch-dictation-card {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--notch-border);
+  border-radius: 18px;
+  padding: 12px 14px;
+  background: var(--notch-bubble);
+  color: var(--notch-bubble-text);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
+  backdrop-filter: blur(24px) saturate(150%);
+  -webkit-backdrop-filter: blur(24px) saturate(150%);
+}
+
+.notch-dictation-keys {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.notch-dictation-chord {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.notch-dictation-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.notch-dictation-plus {
+  font-size: 11px;
+  color: var(--notch-bubble-text);
+  opacity: 0.55;
+}
+
+.notch-keycap {
+  display: inline-grid;
+  min-width: 30px;
+  height: 24px;
+  place-items: center;
+  border-radius: 7px;
+  padding: 0 7px;
+  background: var(--notch-keycap-bg);
+  color: var(--notch-keycap-text);
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+.notch-dictation-text {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 0;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 13.5px;
+  font-weight: 450;
+  line-height: 1.45;
+  color: var(--notch-bubble-text);
+}
+
+.notch-mic-bubble {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  place-items: center;
+  border: 1px solid var(--notch-border);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--notch-surface) 72%, transparent);
+  color: var(--notch-text);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.notch-answer-pill {
+  display: flex;
+  width: 456px;
+  max-width: calc(100vw - 24px);
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  padding: 12px 18px;
+  background: transparent;
+  color: var(--notch-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.notch-answer-pill-mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  color: var(--notch-accent);
+}
+
+.notch-answer-pill-text {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 520;
+  letter-spacing: -0.01em;
+}
+
+.notch-confirm-bubble {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  place-items: center;
+  border-radius: 999px;
+  background: #101521;
+  color: var(--notch-check);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
+}
+
+/* Mist: cream bubbles, navy pills and a light-blue accent. */
+html[data-palette="mist"][data-window="notch"] {
+  --notch-surface: rgba(11, 16, 29, 0.94);
+  --notch-text: #eef4ff;
+  --notch-muted: #9fb3cb;
+  --notch-border: rgba(188, 220, 255, 0.16);
+  --notch-accent: #8ed8ff;
+  --notch-bubble: #fbf7ef;
+  --notch-bubble-text: #161a24;
+  --notch-keycap-bg: #121722;
+  --notch-keycap-text: #f4f7ff;
+}
+
+html[data-palette="mist"][data-theme="light"][data-window="notch"] {
+  --notch-surface: #ffffff;
+  --notch-text: #161a24;
+  --notch-muted: #5c6a80;
+  --notch-border: rgba(22, 26, 36, 0.14);
+  --notch-accent: #2f8fbe;
+  --notch-bubble: #ffffff;
+  --notch-bubble-text: #161a24;
+  --notch-keycap-bg: #121722;
+  --notch-keycap-text: #f4f7ff;
+}

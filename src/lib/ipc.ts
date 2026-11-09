@@ -126,9 +126,13 @@ export interface InstalledApp {
 
 export type ThemeMode = "system" | "dark" | "light";
 
+/** The overlay's tone: office gold or the cream/blue "mist" palette. */
+export type ThemePalette = "gold" | "mist";
+
 export interface ThemeSettings {
   mode: ThemeMode;
   accent: string;
+  palette: ThemePalette;
 }
 
 /** The five-slot Loadout, persisted as one JSON document in SQLite. */
