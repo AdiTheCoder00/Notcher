@@ -20,6 +20,7 @@ export const EVENTS = {
   hotkeyState: "hotkeys://state",
   taskDue: "task://due",
   controlState: "control://state",
+  controlFocus: "control://focus",
   loadoutFocus: "app://loadout-focus",
   loadoutChanged: "loadout://changed",
 } as const;
@@ -31,7 +32,8 @@ export interface EventPayloads {
   "audio://level": AudioLevel;
   "hotkeys://state": HotkeySnapshot;
   "task://due": ScheduledTask;
-  "control://state": { open: boolean };
+  "control://state": { open: boolean; mode?: "peek" | "control" };
+  "control://focus": null;
   "app://loadout-focus": null;
   "loadout://changed": Loadout;
 }

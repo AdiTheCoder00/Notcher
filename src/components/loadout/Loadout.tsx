@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import type {
   GestureName,
   Loadout,
@@ -56,7 +56,7 @@ const THEME_MODES: { value: ThemeMode; label: string }[] = [
   { value: "light", label: "Light" },
 ];
 
-const ACCENTS = ["#7c8cff", "#22d3ee", "#a855f7", "#f97316", "#10b981", "#f43f5e"];
+const ACCENTS = ["#d0ad5e", "#7c8cff", "#22d3ee", "#a855f7", "#f97316", "#10b981", "#f43f5e"];
 
 const MODIFIERS: { key: "ctrl" | "shift" | "alt" | "win"; label: string }[] = [
   { key: "ctrl", label: "Ctrl" },
@@ -205,8 +205,8 @@ function Chip({
       aria-pressed={selected}
       className={`rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition ${
         selected
-          ? "border-accent/60 bg-accent/15 text-accent-soft"
-          : "border-line bg-panel-raised/50 text-zinc-300 hover:border-accent/30 hover:text-accent-soft"
+          ? "border-accent/60 bg-accent/15 text-accent-text"
+          : "border-line bg-panel-raised/50 text-zinc-300 hover:border-accent/30 hover:text-accent-text"
       }`}
     >
       {children}
@@ -268,6 +268,7 @@ function PromptPreview({ title, value }: { title: string; value: string }) {
  * debounced SQLite write, so this component stays a pure view of `loadout`.
  */
 export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
+  const reducedMotion = useReducedMotion();
   const [selected, setSelected] = useState<SlotKey>("voice");
   const [newApp, setNewApp] = useState("");
   const fileInput = useRef<HTMLInputElement | null>(null);
@@ -365,7 +366,6 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
 
   return (
     <section
-      id="loadout"
       className="dashboard-surface rounded-2xl border border-line bg-panel/80 p-5"
       aria-labelledby="loadout-heading"
     >
@@ -382,14 +382,14 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
           <button
             type="button"
             onClick={() => void exportJson()}
-            className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-[11px] font-medium text-muted transition hover:border-accent/40 hover:text-accent-soft"
+            className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-[11px] font-medium text-muted transition hover:border-accent/40 hover:text-accent-text"
           >
             <DownloadIcon size={13} /> Export
           </button>
           <button
             type="button"
             onClick={() => fileInput.current?.click()}
-            className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-[11px] font-medium text-muted transition hover:border-accent/40 hover:text-accent-soft"
+            className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-[11px] font-medium text-muted transition hover:border-accent/40 hover:text-accent-text"
           >
             <UploadIcon size={13} /> Import
           </button>
@@ -443,8 +443,8 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
                 "radial-gradient(circle at 50% 30%, color-mix(in oklab, var(--color-accent) 26%, transparent), transparent 70%)",
               boxShadow: "0 0 30px -8px color-mix(in oklab, var(--color-accent) 60%, transparent)",
             }}
-            animate={{ scale: [1, 1.02, 1] }}
-            transition={{ duration: 5, repeat: Infinity, ease: "easeInOut" }}
+            animate={{ scale: reducedMotion ? 1 : [1, 1.02, 1] }}
+            transition={reducedMotion ? { duration: 0 } : { duration: 5, repeat: Infinity, ease: "easeInOut" }}
           >
             <span style={{ color: "var(--color-accent-soft)" }}>
               <MurmurMark size={24} />
@@ -486,7 +486,7 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
                 <Icon size={14} />
                 <span className="text-[11.5px] font-semibold text-zinc-200">{point.label}</span>
               </span>
-              <span className="mt-1 block truncate text-[9.5px] text-muted">
+              <span className="mt-1 block truncate text-[11px] text-muted">
                 {point.summary(loadout)}
               </span>
             </button>
@@ -540,7 +540,11 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
                 checked={loadout.voice.polish}
                 onChange={(polish) => patch({ voice: { ...loadout.voice, polish } })}
               />
+              <label htmlFor="dictation-instructions" className="block text-xs font-medium text-muted">
+                Extra dictation instructions
+              </label>
               <textarea
+                id="dictation-instructions"
                 value={loadout.voice.custom}
                 maxLength={600}
                 rows={3}
@@ -587,14 +591,16 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
                 {loadout.hotkeys.bindings.map((slot) => {
                   const duplicate = duplicateChords.has(slot.gesture);
                   const empty = keysFor(slot).length === 0;
+                  const altOnly = slot.alt && !slot.ctrl && !slot.shift && !slot.win;
                   return (
                     <div
                       key={slot.gesture}
                       className="rounded-xl border px-3 py-2.5"
                       style={{
-                        borderColor: duplicate
-                          ? "color-mix(in oklab, #f59e0b 45%, transparent)"
-                          : "var(--color-line)",
+                        borderColor:
+                          duplicate || altOnly
+                            ? "color-mix(in oklab, #f59e0b 45%, transparent)"
+                            : "var(--color-line)",
                       }}
                     >
                       <div className="flex items-center justify-between gap-3">
@@ -610,10 +616,10 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
                             aria-label={`Enable ${GESTURE_LABEL[slot.gesture]}`}
                             onClick={() =>
                               patchSlot(slot.gesture, {
-                                enabled: empty ? false : !slot.enabled,
+                                enabled: empty || altOnly ? false : !slot.enabled,
                               })
                             }
-                            disabled={empty}
+                            disabled={empty || altOnly}
                             className={`relative h-6 w-10 shrink-0 rounded-full border transition disabled:opacity-40 ${
                               slot.enabled
                                 ? "border-accent/60 bg-accent/70"
@@ -654,7 +660,7 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
                               }}
                               className={`rounded-md border px-2 py-1 text-[10.5px] font-medium transition ${
                                 on
-                                  ? "border-accent/50 bg-accent/15 text-accent-soft"
+                                  ? "border-accent/50 bg-accent/15 text-accent-text"
                                   : "border-line text-muted hover:text-zinc-200"
                               }`}
                             >
@@ -671,6 +677,12 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
                       {empty ? (
                         <p className="mt-2 text-[10.5px] leading-relaxed text-muted">
                           Pick at least one modifier to use this gesture.
+                        </p>
+                      ) : null}
+                      {altOnly ? (
+                        <p className="mt-2 text-[10.5px] leading-relaxed text-amber-300">
+                          Alt on its own stays off: holding it would fire while you use Alt+Tab.
+                          Add Ctrl, Shift or Win.
                         </p>
                       ) : null}
                     </div>
@@ -776,7 +788,7 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
                   type="button"
                   onClick={addApp}
                   disabled={!newApp.trim() || loadout.apps.pinned.length >= 12}
-                  className="flex items-center gap-1 rounded-xl border border-line px-3 py-2 text-[11px] font-medium text-zinc-300 transition hover:border-accent/40 hover:text-accent-soft disabled:opacity-40"
+                  className="flex items-center gap-1 rounded-xl border border-line px-3 py-2 text-[11px] font-medium text-zinc-300 transition hover:border-accent/40 hover:text-accent-text disabled:opacity-40"
                 >
                   <PlusIcon size={13} /> Pin
                 </button>
@@ -847,8 +859,8 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
               >
                 <p className="text-[12px] font-medium text-zinc-200">Accent preview</p>
                 <p className="mt-1 text-[11px] leading-relaxed text-muted">
-                  The accent colours the Loadout map, the Control Centre and focus rings. Mode{" "}
-                  <span className="text-accent-soft">{loadout.theme.mode}</span> applies instantly.
+                  The accent colours the Loadout map, dashboard and notch focus rings. The Control Centre keeps its dark and gold palette. Mode{" "}
+                  <span className="text-accent-text">{loadout.theme.mode}</span> applies instantly.
                 </p>
               </div>
             </div>

@@ -17,9 +17,11 @@ use tauri::{
 };
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETSTATE, ABS_AUTOHIDE, APPBARDATA};
+use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, IsWindowVisible, ShowWindow, SW_SHOW};
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, GetForegroundWindow, IsWindow, IsWindowVisible, SetForegroundWindow, ShowWindow,
-    SW_HIDE, SW_SHOWNOACTIVATE,
+    SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
 };
 
 pub const LABEL: &str = "notch";
@@ -29,7 +31,7 @@ pub const CONTROL_EVENT: &str = "control://state";
 /// The idle window is only as wide as the resting mark, so its hover target
 /// covers very little of the desktop. Other states grow just enough for their
 /// content.
-const IDLE_WIDTH: f64 = 184.0;
+const IDLE_WIDTH: f64 = 200.0;
 const IDLE_HEIGHT: f64 = 32.0;
 const LISTENING_WIDTH: f64 = 396.0;
 const LISTENING_HEIGHT: f64 = 76.0;
@@ -39,17 +41,58 @@ const ANSWER_WIDTH: f64 = 560.0;
 const ANSWER_HEIGHT: f64 = 300.0;
 const ERROR_WIDTH: f64 = 448.0;
 const ERROR_HEIGHT: f64 = 112.0;
+/// Window width minus body width: a 12 px wing on each side of the panel, which
+/// flares the top corners into the screen edge
+/// (`html[data-window="notch"] .cc-overlay::before/::after`). Every Control
+/// Centre panel is a body width plus this margin.
+const SHOULDER_WINGS: f64 = 24.0;
 /// The tabbed Control Centre grows downward from the notch.
-pub const CONTROL_WIDTH: f64 = 880.0;
-pub const CONTROL_HEIGHT: f64 = 620.0;
+pub const CONTROL_WIDTH: f64 = 700.0 + SHOULDER_WINGS;
+pub const CONTROL_HEIGHT: f64 = 430.0;
+/// Hovering the resting mark grows just the Now playing card: 127px of card
+/// plus 4px above and 12px below, with no dead band left over.
+const PEEK_WIDTH: f64 = 420.0;
+const PEEK_HEIGHT: f64 = 143.0;
 /// Gap between the top of the monitor and the pill.
 const TOP_INSET: f64 = 0.0;
 
 /// Set while the Control Centre owns the notch window. It keeps state updates
 /// from shrinking the window underneath the open panel.
 static CONTROL_OPEN: AtomicBool = AtomicBool::new(false);
+/// Set while the hover media card owns the notch window.
+static PEEK_OPEN: AtomicBool = AtomicBool::new(false);
+static STATE_GENERATION: Mutex<u64> = Mutex::new(0);
 static PREVIOUS_FOREGROUND: Mutex<Option<isize>> = Mutex::new(None);
-static TASKBARS_TO_RESTORE: Mutex<Option<Vec<isize>>> = Mutex::new(None);
+
+/// Recover a taskbar left hidden by an older Murmur build without changing auto-hide.
+pub fn restore_taskbar() {
+    let mut data = APPBARDATA {
+        cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+        ..Default::default()
+    };
+    let flags = unsafe { SHAppBarMessage(ABM_GETSTATE, &mut data) };
+    if flags & ABS_AUTOHIDE as usize != 0 {
+        return;
+    }
+    if let Ok(taskbar) = unsafe { FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) } {
+        if !unsafe { IsWindowVisible(taskbar) }.as_bool() {
+            let _ = unsafe { ShowWindow(taskbar, SW_SHOW) };
+        }
+        if let Err(err) = unsafe {
+            SetWindowPos(
+                taskbar,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+        } {
+            eprintln!("[notch] could not restore the Windows taskbar: {err}");
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,6 +146,9 @@ pub struct NotchPayload<'a> {
 #[derive(Debug, Clone, Serialize)]
 pub struct ControlPayload {
     pub open: bool,
+    /// "control" for the full panel, "peek" for the hover media card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<&'static str>,
 }
 
 /// Builds the overlay window. Called once from setup.
@@ -190,73 +236,23 @@ fn remember_foreground() {
     }
 }
 
-fn restore_foreground() {
+fn restore_foreground(notch: isize) {
     let previous = PREVIOUS_FOREGROUND
         .lock()
         .ok()
         .and_then(|mut previous| previous.take());
     if let Some(hwnd) = previous {
+        if !should_restore_foreground(notch, unsafe { GetForegroundWindow() }.0 as isize) {
+            return;
+        }
         if !unsafe { SetForegroundWindow(HWND(hwnd as _)) }.as_bool() {
             eprintln!("[notch] Windows did not restore the previously focused window");
         }
     }
 }
 
-fn hide_taskbars() -> Result<()> {
-    let mut taskbars_to_restore = TASKBARS_TO_RESTORE
-        .lock()
-        .map_err(|_| anyhow!("taskbar state lock was poisoned"))?;
-    if taskbars_to_restore.is_some() {
-        return Ok(());
-    }
-
-    let mut hidden = Vec::new();
-    for class_name in [w!("Shell_TrayWnd"), w!("Shell_SecondaryTrayWnd")] {
-        let mut after = HWND::default();
-        while let Ok(taskbar) =
-            unsafe { FindWindowExW(HWND::default(), after, class_name, PCWSTR::null()) }
-        {
-            after = taskbar;
-            if !unsafe { IsWindowVisible(taskbar) }.as_bool() {
-                continue;
-            }
-
-            hidden.push(taskbar.0 as isize);
-            unsafe {
-                let _ = ShowWindow(taskbar, SW_HIDE);
-            }
-            if unsafe { IsWindowVisible(taskbar) }.as_bool() {
-                for hwnd in hidden {
-                    unsafe {
-                        let _ = ShowWindow(HWND(hwnd as _), SW_SHOWNOACTIVATE);
-                    }
-                }
-                return Err(anyhow!("Windows did not hide the taskbar"));
-            }
-        }
-    }
-
-    *taskbars_to_restore = Some(hidden);
-    Ok(())
-}
-
-pub fn restore_taskbars() -> Result<()> {
-    let taskbars = TASKBARS_TO_RESTORE
-        .lock()
-        .map_err(|_| anyhow!("taskbar state lock was poisoned"))?
-        .take();
-
-    if let Some(taskbars) = taskbars {
-        for hwnd in taskbars {
-            let taskbar = HWND(hwnd as _);
-            if unsafe { IsWindow(taskbar) }.as_bool() {
-                unsafe {
-                    let _ = ShowWindow(taskbar, SW_SHOWNOACTIVATE);
-                }
-            }
-        }
-    }
-    Ok(())
+fn should_restore_foreground(notch: isize, foreground: isize) -> bool {
+    notch != 0 && foreground == notch
 }
 
 /// Opens or closes the Control Centre inside the notch window. Opening grows
@@ -268,6 +264,7 @@ pub fn set_control_open(app: &AppHandle, open: bool) -> Result<()> {
     };
 
     if open {
+        PEEK_OPEN.store(false, Ordering::SeqCst);
         if !CONTROL_OPEN.swap(true, Ordering::SeqCst) {
             remember_foreground();
         }
@@ -279,75 +276,102 @@ pub fn set_control_open(app: &AppHandle, open: bool) -> Result<()> {
         resize(app, CONTROL_WIDTH, CONTROL_HEIGHT)?;
     } else {
         CONTROL_OPEN.store(false, Ordering::SeqCst);
+        PEEK_OPEN.store(false, Ordering::SeqCst);
         let reset = idle(app);
-        let taskbars = restore_taskbars();
-        restore_foreground();
+        restore_foreground(window.hwnd()?.0 as isize);
         reset?;
-        taskbars?;
     }
 
-    app.emit_to(LABEL, CONTROL_EVENT, ControlPayload { open })
-        .map_err(|err| anyhow!("emit Control Centre state: {err}"))
+    app.emit_to(
+        LABEL,
+        CONTROL_EVENT,
+        ControlPayload {
+            open,
+            mode: open.then_some("control"),
+        },
+    )
+    .map_err(|err| anyhow!("emit Control Centre state: {err}"))
 }
 
-/// Expands the launcher over the primary display and temporarily hides taskbars.
-pub fn set_launcher_open(app: &AppHandle) -> Result<()> {
+/// Opens or closes the compact media card shown when the resting mark is
+/// hovered. It never shrinks an open Control Centre.
+pub fn set_peek_open(app: &AppHandle, open: bool) -> Result<()> {
+    if CONTROL_OPEN.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
     let Some(window) = app.get_webview_window(LABEL) else {
         return Ok(());
     };
 
-    let monitor = app
-        .primary_monitor()
-        .map_err(|err| anyhow!("monitor lookup failed: {err}"))?
-        .ok_or_else(|| anyhow!("no primary monitor is available for the launcher"))?;
-    let scale = monitor.scale_factor();
-    let origin = monitor.position();
-    let size = monitor.size();
-
-    if !CONTROL_OPEN.swap(true, Ordering::SeqCst) {
-        remember_foreground();
-    }
-
-    let opened = (|| -> Result<()> {
-        hide_taskbars()?;
-        window.show().context("show the launcher")?;
-        window
-            .set_always_on_top(true)
-            .context("keep the launcher above other windows")?;
+    if open {
+        PEEK_OPEN.store(true, Ordering::SeqCst);
+        window.show().context("show the notch")?;
+        let _ = window.set_always_on_top(true);
         window
             .set_ignore_cursor_events(false)
-            .context("make the launcher interactive")?;
-        window
-            .set_size(LogicalSize::new(
-                size.width as f64 / scale,
-                size.height as f64 / scale,
-            ))
-            .context("expand the launcher to the primary display")?;
-        window
-            .set_position(PhysicalPosition::new(origin.x, origin.y))
-            .context("position the launcher over the primary display")?;
-        window.set_focus().context("focus the launcher")?;
-        Ok(())
-    })();
-
-    if let Err(err) = opened {
-        CONTROL_OPEN.store(false, Ordering::SeqCst);
-        if let Err(reset_err) = idle(app) {
-            eprintln!("[notch] could not restore the idle window: {reset_err:#}");
-        }
-        if let Err(taskbar_err) = restore_taskbars() {
-            eprintln!("[notch] could not restore the taskbar: {taskbar_err:#}");
-        }
-        restore_foreground();
-        return Err(err);
+            .context("make the media card interactive")?;
+        resize(app, PEEK_WIDTH, PEEK_HEIGHT)?;
+    } else {
+        PEEK_OPEN.store(false, Ordering::SeqCst);
+        idle(app)?;
     }
 
-    app.emit_to(LABEL, CONTROL_EVENT, ControlPayload { open: true })
-        .map_err(|err| anyhow!("emit launcher state: {err}"))
+    app.emit_to(
+        LABEL,
+        CONTROL_EVENT,
+        ControlPayload {
+            open,
+            mode: open.then_some("peek"),
+        },
+    )
+    .map_err(|err| anyhow!("emit media card state: {err}"))
+}
+
+/// Focuses the compact Control Centre so the app search can accept typing.
+pub fn set_launcher_open(app: &AppHandle) -> Result<()> {
+    if !control_open() {
+        set_control_open(app, true)?;
+    }
+    if let Some(window) = app.get_webview_window(LABEL) {
+        window.set_focus().context("focus the launcher")?;
+    }
+    app.emit_to(LABEL, "control://focus", ())
+        .context("focus the requested Control Centre control")
+}
+
+pub fn size_control_panel(app: &AppHandle, panel: &str) -> Result<()> {
+    if !control_open() {
+        return Ok(());
+    }
+    let (width, height): (f64, f64) = match panel {
+        "control" => (CONTROL_WIDTH, 430.0),
+        "today" => (900.0 + SHOULDER_WINGS, 460.0),
+        "stats" => (900.0 + SHOULDER_WINGS, 380.0),
+        "clipboard" => (900.0 + SHOULDER_WINGS, 460.0),
+        "shelf" => (900.0 + SHOULDER_WINGS, 340.0),
+        "apps" => (740.0 + SHOULDER_WINGS, 650.0),
+        "wallpapers" => (1060.0 + SHOULDER_WINGS, 350.0),
+        "power" => (CONTROL_WIDTH, 205.0),
+        _ => return Err(anyhow!("Unknown Control Centre panel")),
+    };
+    if let Some(monitor) = app.primary_monitor()? {
+        let scale = monitor.scale_factor();
+        return resize(
+            app,
+            width.min(monitor.size().width as f64 / scale),
+            height.min(monitor.size().height as f64 / scale),
+        );
+    }
+    resize(app, width, height)
 }
 
 pub fn control_open() -> bool {
     CONTROL_OPEN.load(Ordering::SeqCst)
+}
+
+pub fn panels_open() -> bool {
+    control_open() || PEEK_OPEN.load(Ordering::SeqCst)
 }
 
 /// Shows the overlay and pushes a state to it. Never calls `set_focus`.
@@ -366,7 +390,16 @@ pub fn show(app: &AppHandle, state: NotchState, text: Option<&str>) -> Result<()
 
 /// Pushes a state to the overlay and keeps click-through in sync with it.
 pub fn update(app: &AppHandle, state: NotchState, text: Option<&str>) -> Result<()> {
-    let control = CONTROL_OPEN.load(Ordering::SeqCst);
+    let mut generation = STATE_GENERATION
+        .lock()
+        .map_err(|_| anyhow!("notch state lock poisoned"))?;
+    *generation = generation.wrapping_add(1);
+    update_inner(app, state, text)
+}
+
+fn update_inner(app: &AppHandle, state: NotchState, text: Option<&str>) -> Result<()> {
+    // The media card owns the window too; neither may shrink under the pointer.
+    let control = panels_open();
 
     // The panel keeps its size while it is open; a background state update must
     // not shrink the window underneath it.
@@ -396,10 +429,48 @@ pub fn idle(app: &AppHandle) -> Result<()> {
 
 /// Returns to idle after a delay, so a result stays readable first.
 pub fn idle_later(app: AppHandle, delay: Duration) {
+    let generation = match STATE_GENERATION.lock() {
+        Ok(generation) => *generation,
+        Err(_) => return,
+    };
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(delay).await;
-        if let Err(err) = idle(&app) {
+        let Ok(mut current) = STATE_GENERATION.lock() else {
+            return;
+        };
+        if !advance_if_current(&mut current, generation) {
+            return;
+        }
+        if let Err(err) = update_inner(&app, NotchState::Idle, None) {
             eprintln!("[notch] could not return to idle: {err:#}");
         }
     });
+}
+
+fn advance_if_current(current: &mut u64, expected: u64) -> bool {
+    if *current != expected {
+        return false;
+    }
+    *current = current.wrapping_add(1);
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::advance_if_current;
+
+    #[test]
+    fn closing_only_restores_focus_while_the_notch_owns_it() {
+        assert!(super::should_restore_foreground(1, 1));
+        assert!(!super::should_restore_foreground(1, 2));
+        assert!(!super::should_restore_foreground(1, 0));
+    }
+
+    #[test]
+    fn old_dismissal_cannot_replace_a_newer_state() {
+        let mut generation = 2;
+        assert!(!advance_if_current(&mut generation, 1));
+        assert_eq!(generation, 2);
+        assert!(advance_if_current(&mut generation, 2));
+    }
 }

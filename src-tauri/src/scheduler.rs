@@ -36,6 +36,7 @@ const CATCH_UP_LIMIT: i64 = 500;
 /// A due task must never be held up by a slow model: after this the stored
 /// plan runs instead.
 const EXECUTE_PLAN_TIMEOUT: Duration = Duration::from_secs(8);
+static ACTION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // Task model
@@ -269,6 +270,18 @@ impl Recurrence {
         if frequency == Frequency::Monthly && !by_day.is_empty() {
             return Err(anyhow!("BYDAY is not supported with monthly recurrence"));
         }
+        if frequency == Frequency::Hourly
+            && (by_hour.is_some() || !by_day.is_empty() || by_month_day.is_some())
+        {
+            return Err(anyhow!(
+                "hourly recurrence supports only INTERVAL and BYMINUTE"
+            ));
+        }
+        if frequency == Frequency::Weekly && by_month_day.is_some() {
+            return Err(anyhow!(
+                "BYMONTHDAY is not supported with weekly recurrence"
+            ));
+        }
         Ok(Self {
             frequency,
             interval,
@@ -306,6 +319,16 @@ impl Recurrence {
         self.next_after_ms_from(after_ms, after_ms)
     }
 
+    /// Keep a monthly creation day explicit when the first run falls in a shorter month.
+    pub fn rule_with_month_day(&self, rule: &str, anchor_ms: i64) -> Option<String> {
+        if self.frequency == Frequency::Monthly && self.by_month_day.is_none() {
+            let day = Local.timestamp_millis_opt(anchor_ms).single()?.day();
+            Some(format!("{rule};BYMONTHDAY={day}"))
+        } else {
+            Some(rule.to_string())
+        }
+    }
+
     pub fn next_after_ms_from(&self, after_ms: i64, anchor_ms: i64) -> Option<i64> {
         let after = Local.timestamp_millis_opt(after_ms).single()?.naive_local();
         let anchor = Local
@@ -329,16 +352,15 @@ impl Recurrence {
 
     fn next_hourly(&self, after: NaiveDateTime, anchor: NaiveDateTime) -> Option<NaiveDateTime> {
         let minute = self.by_minute.unwrap_or(anchor.minute());
-        let mut candidate = anchor.date().and_hms_opt(anchor.hour(), minute, 0)?;
-
-        for _ in 0..MAX_STEPS {
-            if candidate > after {
-                return Some(candidate);
-            }
-            candidate =
-                candidate.checked_add_signed(chrono::Duration::hours(self.interval as i64))?;
+        let candidate = anchor.date().and_hms_opt(anchor.hour(), minute, 0)?;
+        if candidate > after {
+            return Some(candidate);
         }
-        None
+        let elapsed = after.signed_duration_since(candidate).num_hours();
+        let steps = elapsed.checked_div(self.interval as i64)?.checked_add(1)?;
+        candidate.checked_add_signed(chrono::Duration::try_hours(
+            steps.checked_mul(self.interval as i64)?,
+        )?)
     }
 
     fn next_daily(&self, after: NaiveDateTime, anchor: NaiveDateTime) -> Option<NaiveDateTime> {
@@ -348,7 +370,10 @@ impl Recurrence {
 
         for _ in 0..MAX_STEPS {
             let candidate = date.and_hms_opt(hour, minute, 0)?;
-            if candidate > after {
+            if candidate > after
+                && (self.by_day.is_empty() || self.by_day.contains(&date.weekday()))
+                && self.by_month_day.map_or(true, |day| date.day() == day)
+            {
                 return Some(candidate);
             }
             date = date.checked_add_days(Days::new(self.interval as u64))?;
@@ -565,10 +590,7 @@ async fn catch_up_on_start(app: &AppHandle) -> Result<()> {
         state.db.due_tasks(now, CATCH_UP_LIMIT)?
     };
 
-    for task in due {
-        process_due_task(app, task).await?;
-    }
-
+    process_batch(app, due, now).await;
     Ok(())
 }
 
@@ -579,19 +601,33 @@ async fn run_due(app: &AppHandle) -> Result<()> {
         state.db.due_tasks(now, DUE_LIMIT)?
     };
 
-    for task in due {
-        if let Err(err) = process_due_task(app, task.clone()).await {
-            eprintln!("[scheduler] task {} could not start: {err:#}", task.id);
-            record_failure(app, &task, now, &err);
-        }
-    }
-
+    process_batch(app, due, now).await;
     Ok(())
 }
 
-async fn process_due_task(app: &AppHandle, task: ScheduledTask) -> Result<()> {
+async fn process_batch(app: &AppHandle, due: Vec<ScheduledTask>, selected_at: i64) {
+    for chunk in due.chunks(8) {
+        let mut jobs = tokio::task::JoinSet::new();
+        for task in chunk.iter().cloned() {
+            let app = app.clone();
+            jobs.spawn(async move {
+                if let Err(err) = process_due_task(&app, task.clone(), selected_at).await {
+                    eprintln!("[scheduler] task {} could not start: {err:#}", task.id);
+                    record_failure(&app, &task, selected_at, &err);
+                }
+            });
+        }
+        while let Some(result) = jobs.join_next().await {
+            if let Err(err) = result {
+                eprintln!("[scheduler] task worker failed: {err}");
+            }
+        }
+    }
+}
+
+async fn process_due_task(app: &AppHandle, task: ScheduledTask, selected_at: i64) -> Result<()> {
     let now = now_ms();
-    match catch_up_decision(task.schedule, task.due_at_ms, now, MISSED_WINDOW_MS) {
+    match catch_up_decision(task.schedule, task.due_at_ms, selected_at, MISSED_WINDOW_MS) {
         CatchUp::Fire => {
             if let Err(err) = fire_task(app, task.clone(), now).await {
                 record_failure(app, &task, now, &err);
@@ -697,6 +733,7 @@ async fn run_action(app: &AppHandle, task: &ScheduledTask) -> Result<String> {
 
     let handle = app.clone();
     let prompt = task.prompt.clone();
+    let _action_guard = ACTION_LOCK.lock().await;
 
     // Opening apps, typing and toasts can block briefly; keep them off the
     // async runtime's worker threads.
@@ -866,6 +903,75 @@ mod tests {
     }
 
     #[test]
+    fn daily_filters_skip_excluded_weekdays_and_month_days() {
+        let weekdays =
+            Recurrence::parse("FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9;BYMINUTE=0").unwrap();
+        assert_eq!(
+            weekdays.next_after_local_from(at(2026, 11, 6, 10, 0), at(2026, 11, 6, 9, 0)),
+            Some(at(2026, 11, 9, 9, 0))
+        );
+        let monthly_day =
+            Recurrence::parse("FREQ=DAILY;BYMONTHDAY=15;BYHOUR=9;BYMINUTE=0").unwrap();
+        assert_eq!(
+            monthly_day.next_after_local(at(2026, 11, 6, 10, 0)),
+            Some(at(2026, 11, 15, 9, 0))
+        );
+        for invalid in [
+            "FREQ=HOURLY;BYHOUR=9",
+            "FREQ=HOURLY;BYDAY=MO",
+            "FREQ=HOURLY;BYMONTHDAY=15",
+            "FREQ=WEEKLY;BYMONTHDAY=15",
+        ] {
+            assert!(Recurrence::parse(invalid).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn inserted_hourly_task_keeps_its_requested_start_minute() {
+        let due = Local
+            .from_local_datetime(&at(2026, 11, 9, 16, 45))
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let db = crate::db::Database::open(":memory:").unwrap();
+        let fields = task_fields(
+            "hourly reminder",
+            ActionKind::Remind,
+            "check",
+            Some("FREQ=HOURLY"),
+            due,
+        )
+        .unwrap();
+        let task = db.insert_task(&fields).unwrap();
+        let next = Local
+            .timestamp_millis_opt(next_due_ms(&task, due).unwrap())
+            .single()
+            .unwrap()
+            .naive_local();
+        assert_eq!(next, at(2026, 11, 9, 17, 45));
+    }
+
+    #[test]
+    fn monthly_planning_keeps_the_day_across_a_short_first_month() {
+        let rule = Recurrence::parse("FREQ=MONTHLY;BYHOUR=9;BYMINUTE=0").unwrap();
+        let created = Local
+            .from_local_datetime(&at(2026, 1, 31, 10, 0))
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let anchored = Recurrence::parse(
+            &rule
+                .rule_with_month_day("FREQ=MONTHLY;BYHOUR=9;BYMINUTE=0", created)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            anchored.next_after_local_from(at(2026, 2, 28, 9, 0), at(2026, 2, 28, 9, 0)),
+            Some(at(2026, 3, 31, 9, 0))
+        );
+    }
+
+    #[test]
     fn daily_rule_uses_by_hour_and_minute() {
         let rule = Recurrence::parse("FREQ=DAILY;BYHOUR=9;BYMINUTE=0").expect("rule parses");
         assert_eq!(
@@ -881,6 +987,17 @@ mod tests {
         assert_eq!(
             rule.next_after_local(at(2026, 11, 7, 9, 0)),
             Some(at(2026, 11, 10, 8, 30))
+        );
+    }
+
+    #[test]
+    fn hourly_rule_survives_more_than_five_thousand_occurrences() {
+        let rule = Recurrence::parse("FREQ=HOURLY;INTERVAL=1").expect("rule parses");
+        let anchor = at(2026, 1, 1, 9, 0);
+        let after = anchor + chrono::Duration::hours(6000);
+        assert_eq!(
+            rule.next_after_local_from(after, anchor),
+            Some(after + chrono::Duration::hours(1))
         );
     }
 

@@ -16,7 +16,7 @@ pub const SETTINGS_KEY: &str = "loadout";
 /// wake preference or pinned app list without an app restart.
 pub const CHANGED_EVENT: &str = "loadout://changed";
 
-pub const DEFAULT_ACCENT: &str = "#7c8cff";
+pub const DEFAULT_ACCENT: &str = "#d0ad5e";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Loadout {
@@ -92,6 +92,13 @@ impl Loadout {
                 .unwrap_or_default();
 
             if !slot.ctrl && !slot.shift && !slot.alt && !slot.win {
+                slot.enabled = false;
+            }
+            // Alt on its own is the prefix of Alt+Tab, Alt+F4 and Alt+Space: held as a
+            // push-to-talk chord it fires a gesture every time the user switches
+            // windows. Keep the chord stored (so the editor can show what was picked)
+            // but never hand it to the hook.
+            if slot.alt && !slot.ctrl && !slot.shift && !slot.win {
                 slot.enabled = false;
             }
             let chord = (slot.ctrl, slot.shift, slot.alt, slot.win);
@@ -439,6 +446,35 @@ mod tests {
                 .count();
             assert_eq!(same, 1);
         }
+    }
+
+    #[test]
+    fn normalization_disables_alt_only_chords() {
+        let mut loadout = Loadout::default();
+        for slot in &mut loadout.hotkeys.bindings {
+            if slot.gesture == Gesture::CircleToAsk {
+                slot.ctrl = false;
+                slot.shift = false;
+                slot.alt = true;
+                slot.win = false;
+                slot.enabled = true;
+            }
+        }
+
+        let normalized = loadout.normalize();
+        assert!(
+            normalized.active_bindings().iter().all(|binding|
+                !(binding.alt && !binding.ctrl && !binding.shift && !binding.win)
+            ),
+            "a bare Alt chord must never reach the keyboard hook"
+        );
+        let circle = normalized
+            .hotkeys
+            .bindings
+            .iter()
+            .find(|slot| slot.gesture == Gesture::CircleToAsk)
+            .expect("circle slot");
+        assert!(circle.alt && !circle.enabled);
     }
 
     #[test]

@@ -10,8 +10,9 @@ use std::env;
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use arboard::Clipboard;
@@ -22,6 +23,7 @@ use tauri_plugin_notification::NotificationExt;
 use url::Url;
 use windows::core::{w, PCWSTR};
 use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use winreg::enums::{
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
@@ -35,6 +37,7 @@ use crate::scheduler::ActionKind;
 const CLIPBOARD_SETTLE: Duration = Duration::from_millis(40);
 /// How long the dictated text stays on the clipboard before the old one returns.
 const RESTORE_AFTER: Duration = Duration::from_millis(300);
+static INSERT_LOCK: Mutex<()> = Mutex::new(());
 const APP_PATHS_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\App Paths";
 
 /// Runs one scheduled task action. Called on a blocking thread by the
@@ -79,9 +82,14 @@ struct FoundApp {
 pub struct InstalledApp {
     pub name: String,
     pub target: String,
+    /// PNG data URL for the icon Windows shows for this shortcut, when it has
+    /// one. Decoration only: the UI falls back to a lettered tile.
+    pub icon: Option<String>,
 }
 
-pub fn installed_apps() -> Result<Vec<InstalledApp>> {
+/// Start Menu shortcuts as (display name, `.lnk` path), de-duplicated by name
+/// and sorted the way the Control Centre lists them.
+fn start_menu_apps() -> Vec<(String, PathBuf)> {
     let mut shortcuts = Vec::new();
     for dir in start_menu_dirs() {
         collect_shortcuts(&dir, 0, &mut shortcuts);
@@ -102,27 +110,59 @@ pub fn installed_apps() -> Result<Vec<InstalledApp>> {
     });
 
     let mut names = std::collections::HashSet::new();
-    Ok(shortcuts
+    shortcuts
         .into_iter()
         .filter_map(|path| {
             let name = path.file_stem()?.to_string_lossy().trim().to_string();
             if name.is_empty() || !names.insert(name.to_lowercase()) {
                 return None;
             }
-            Some(InstalledApp {
-                name,
-                target: path.to_string_lossy().into_owned(),
-            })
+            Some((name, path))
         })
-        .collect())
+        .collect()
+}
+
+/// Icons come from the shell and cost real time, so the resolved list is kept
+/// for a couple of minutes: reopening the panel should not pay again.
+static APP_CACHE: Mutex<Option<(Instant, Vec<InstalledApp>)>> = Mutex::new(None);
+const APP_CACHE_TTL: Duration = Duration::from_secs(120);
+
+pub fn installed_apps() -> Result<Vec<InstalledApp>> {
+    if let Ok(cached) = APP_CACHE.lock() {
+        if let Some((built, apps)) = cached.as_ref() {
+            if built.elapsed() < APP_CACHE_TTL {
+                return Ok(apps.clone());
+            }
+        }
+    }
+
+    let shortcuts = start_menu_apps();
+    let paths: Vec<PathBuf> = shortcuts.iter().map(|(_, path)| path.clone()).collect();
+    let icons = crate::app_icons::png_data_urls(&paths);
+    let apps: Vec<InstalledApp> = shortcuts
+        .into_iter()
+        .zip(icons)
+        .map(|((name, path), icon)| InstalledApp {
+            icon,
+            target: path.to_string_lossy().into_owned(),
+            name,
+        })
+        .collect();
+
+    if let Ok(mut cached) = APP_CACHE.lock() {
+        *cached = Some((Instant::now(), apps.clone()));
+    }
+    Ok(apps)
 }
 
 pub fn launch_installed_app(target: &str) -> Result<()> {
-    let app = installed_apps()?
+    // Resolve without icons: launching should not pay for them.
+    let path = start_menu_apps()
         .into_iter()
-        .find(|app| app.target.eq_ignore_ascii_case(target))
+        .find(|(_, path)| path.to_string_lossy().eq_ignore_ascii_case(target))
+        .map(|(_, path)| path)
         .ok_or_else(|| anyhow!("that app is no longer available in the Start Menu"))?;
-    launch_shell(&app.target)
+    launch_shell(&path.to_string_lossy())
 }
 
 /// Resolves and launches an application by name. The target may be an
@@ -357,21 +397,49 @@ fn launch_shell(target: &str) -> Result<()> {
 /// Inserts text at the current focus. The notch never takes focus, so this
 /// lands in the app the user was already in.
 pub fn insert_text(text: &str) -> Result<()> {
+    insert_text_for_window(text, None)
+}
+
+pub fn foreground_window() -> Option<isize> {
+    let hwnd = unsafe { GetForegroundWindow() }.0 as isize;
+    (hwnd != 0).then_some(hwnd)
+}
+
+fn check_focus(target: Option<isize>) -> Result<()> {
+    if !focus_matches(target, foreground_window()) {
+        return Err(anyhow!(
+            "The active window changed; transcript was not pasted"
+        ));
+    }
+    Ok(())
+}
+
+fn focus_matches(target: Option<isize>, current: Option<isize>) -> bool {
+    target.is_none() || target == current
+}
+
+pub fn insert_text_for_window(text: &str, target: Option<isize>) -> Result<()> {
     if text.trim().is_empty() {
         return Ok(());
     }
 
-    match paste_via_clipboard(text) {
+    // Dictation and scheduled typing must share the entire clipboard round-trip.
+    let _guard = INSERT_LOCK
+        .lock()
+        .map_err(|_| anyhow!("text insertion lock poisoned"))?;
+    check_focus(target)?;
+    match paste_via_clipboard(text, target) {
         Ok(()) => Ok(()),
         Err(err) => {
             // Clipboard contention or a blocked shortcut: typing still works.
             eprintln!("[actions] clipboard paste failed ({err:#}); typing the text instead");
+            check_focus(target)?;
             type_directly(text)
         }
     }
 }
 
-fn paste_via_clipboard(text: &str) -> Result<()> {
+fn paste_via_clipboard(text: &str, target: Option<isize>) -> Result<()> {
     let mut clipboard = Clipboard::new().map_err(|err| anyhow!("open the clipboard: {err}"))?;
     let previous = clipboard
         .get_text()
@@ -381,6 +449,11 @@ fn paste_via_clipboard(text: &str) -> Result<()> {
         .set_text(text.to_string())
         .map_err(|err| anyhow!("write the text to the clipboard: {err}"))?;
     thread::sleep(CLIPBOARD_SETTLE);
+
+    if let Err(err) = check_focus(target) {
+        restore_if_unchanged(&mut clipboard, &previous, text);
+        return Err(err);
+    }
 
     if let Err(err) = paste_shortcut() {
         restore_if_unchanged(&mut clipboard, &previous, text);
@@ -409,12 +482,43 @@ fn should_restore_clipboard(current: &str, inserted: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::should_restore_clipboard;
+    use super::{focus_matches, should_restore_clipboard};
+
+    #[test]
+    fn all_text_insertion_waits_for_the_shared_clipboard_transaction() {
+        let guard = super::INSERT_LOCK.lock().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx
+                .send(super::insert_text_for_window("audit", Some(-1)))
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_millis(30))
+            .is_err());
+        drop(guard);
+        let error = done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("active window changed"));
+        worker.join().unwrap();
+    }
 
     #[test]
     fn clipboard_restore_only_replaces_the_text_inserted_by_murmur() {
         assert!(should_restore_clipboard("transcript", "transcript"));
         assert!(!should_restore_clipboard("new copy", "transcript"));
+    }
+
+    #[test]
+    fn dictation_only_pastes_into_the_original_window() {
+        assert!(focus_matches(Some(42), Some(42)));
+        assert!(!focus_matches(Some(42), Some(43)));
+        assert!(!focus_matches(Some(42), None));
     }
 }
 

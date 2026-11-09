@@ -9,7 +9,7 @@ always-listening microphone, no landing page.
 | `Ctrl + Shift` | Circle to ask   | A screen region is captured and sent with your spoken question.     |
 | `Ctrl + Alt`   | Schedule        | A spoken task is parsed into a prompt + time and stored in SQLite.  |
 
-Model: `gemini-2.5-flash` (multimodal). The user supplies their own Gemini API key,
+Model: `gemini-3.5-flash` (multimodal). The user supplies their own Gemini API key,
 stored in the Windows Credential Manager.
 
 ## Status
@@ -19,7 +19,7 @@ Gemini transcription → clipboard paste, live input metering, API key storage,
 circle-to-ask with a freehand screen selection, voice scheduling through Gemini
 function calling, the SQLite task store, a tokio scheduler with restart
 catch-up, all five task actions, the task list screen, the notch Control Centre
-(media, volume, brightness, radios, pinned apps, recent tasks) and the
+(media, volume, radios, pinned apps, recent tasks) and the
 five-slot Loadout whose voice and persona slots rewrite the Gemini prompts.
 
 ## Prerequisites
@@ -56,15 +56,16 @@ Hold `Ctrl+Win`, speak, release:
 1. **Listening** — the default microphone opens on press and `audio://level`
    drives the notch waveform.
 2. **Thinking** — on release the clip becomes a 16 kHz mono i16 WAV in memory and
-   is posted to `gemini-2.5-flash` as inline `audio/wav` base64 with the
+   is posted to `gemini-3.5-flash` as inline `audio/wav` base64 with the
    transcription instruction.
 3. The model is told to fix punctuation and capitalisation, fix obvious grammar
    slips, drop filler words and false starts, keep the speaker's language, and
    output only the final text.
 4. **Done** — the text is pasted into the focused app, then the notch hides.
 
-Recording is capped at **60 seconds**. If the limit is reached, Murmur reports
+Recording stops automatically at **60 seconds**. If the limit is reached, Murmur reports
 an error instead of sending a partial clip.
+Device errors also reject the partial recording instead of submitting incomplete speech.
 
 Insertion (`actions.rs`): save the current clipboard text, set the transcript,
 simulate Ctrl+V with enigo, then restore the previous text only if the clipboard
@@ -84,9 +85,9 @@ what actually happened instead of a status code:
 | Connection/DNS failure     | "No network connection — check your internet and try again."     |
 | Request timeout            | "Gemini took too long to answer — try again."                    |
 
-A timeout is retried **once** (30 s limit per attempt); connection failures and
-rejected keys are not retried, because they would fail identically and only
-double the wait. The API key is read from the Windows Credential Manager on each
+Screen questions and scheduling retry a timeout **once** (30 s per attempt).
+Dictation sends once so a retry cannot delay the next recording. Connection
+failures and rejected keys are not retried. The API key is read from the Windows Credential Manager on each
 request, never from a file.
 
 ## Circle to ask
@@ -110,6 +111,9 @@ Recording starts on the key press, but the **loop's release ends the question**:
 whichever of key-release and loop-release happens last supplies the missing half
 and the request fires once. `Esc` cancels, and an overlay with no loop is closed
 20 s after the keys are released.
+The gesture keeps ownership of the recorder while waiting for the loop and while
+processing the answer; new voice gestures are ignored and test dictation is rejected
+until it finishes.
 
 A repeat within **30 s** continues the same Gemini conversation (`lib.rs` keeps
 up to two previous questions and answers, including their screenshots and
@@ -125,7 +129,7 @@ the monitor.
 
 Hold `Ctrl+Alt`, speak a request, release.
 
-1. The clip goes to `gemini-2.5-flash` with a `create_task` **function
+1. The clip goes to `gemini-3.5-flash` with a `create_task` **function
    declaration**. The prompt includes the current local date, time and IANA
    timezone, so "tomorrow at nine" resolves against the user's clock.
 2. Gemini returns one tool call with a `schedule` (a one-time local ISO
@@ -152,7 +156,7 @@ current next-run time as the migrated anchor; earlier cadence drift cannot be
 reconstructed.
 
 When a task fires, the notch shows `Running: …` and the scheduler asks
-`gemini-2.5-flash` — through a `run_action` function call — for the concrete
+`gemini-3.5-flash` — through a `run_action` function call — for the concrete
 payload to run right now: the exact text to type, the reminder body, a sharper
 search query. The action **kind** is fixed: a reply that changes it is rejected,
 so a reminder can never turn into typing into whatever window happens to have
@@ -187,8 +191,7 @@ and any hotkey press closes it first so a dictation result is never hidden.
   play/pause state, with play/pause, next and previous actions. With no session
   the transport buttons are disabled.
 - **Volume** is the master endpoint scalar through `IAudioEndpointVolume`
-  (slider plus mute); **brightness** is DDC/CI through dxva2
-  (`Get/SetMonitorBrightness`), disabled on monitors that do not expose it.
+  (slider plus mute).
 - **Quick toggles** are WinRT `Radio` state for Wi-Fi and Bluetooth (shown as
   Unavailable when Windows denies radio access) and the Windows app theme,
   written to the Personalize registry key and broadcast with `WM_SETTINGCHANGE`.
@@ -201,6 +204,10 @@ and any hotkey press closes it first so a dictation result is never hidden.
 The panel polls system state every 2.5 s while open and debounces slider writes
 by 140 ms. Core Audio, WinRT and DDC/CI calls run on blocking threads with COM
 initialised per call, so a slow device never stalls the webview.
+The focus timer uses a clock deadline, so it catches up after delayed callbacks or
+sleep. Closing the launcher restores the previous app only if the notch still has
+focus. Power actions enable the account's shutdown privilege for the call and restore
+its previous state afterwards; accounts without that privilege receive an error.
 
 ## Loadout
 
@@ -247,6 +254,10 @@ and hold-to-talk needs the release edge anyway.
   a Win binding fired and no other key was pressed during that Win hold, so
   `Win+E` / `Ctrl+Win+→` keep working. Win held **without** Ctrl is untouched and
   still opens the Start menu normally.
+- **Alt on its own is not a usable chord.** Normalization keeps the value but
+  disables it, because holding Alt is how `Alt+Tab`, `Alt+F4` and `Alt+Space`
+  start — a bare-Alt gesture would fire while the user switches windows. Add
+  Ctrl, Shift or Win to the chord instead.
 - `hotkeys::stop()` posts `WM_QUIT` to the hook thread, which unhooks and exits.
 - The settings list and `hotkey_bindings` command read the same config, so
   rebinding later only changes data.
@@ -319,7 +330,7 @@ src-tauri/src/
   actions.rs              clipboard paste, app/URL/search launch, toast, typing
   screen.rs               GDI monitor capture, physical-pixel crop, downscale, PNG
   overlay.rs              transparent crosshair overlay window per gesture
-  control.rs              SMTC media, Core Audio volume, DDC/CI brightness, radios, theme
+  control.rs              SMTC media, Core Audio volume, radios, theme
   loadout.rs              five-slot Loadout model, normalization, prompt guidance
   scheduler.rs            task model, RRULE subset, catch-up + tokio scheduler
   db.rs                   SQLite: scheduled_tasks, settings/Loadout, migrations
@@ -344,3 +355,24 @@ src-tauri/src/
 - No `unwrap()` in production paths — errors are propagated with `anyhow` and
   mapped to strings at the command boundary.
 - The notch window is created with `focus: false` and never calls `set_focus`.
+
+
+## Regression checks
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --offline
+npm run check:notch-state
+npm run check:notch
+python -m unittest discover -s .github/prompts/design/scripts/tests -v
+```
+
+The state check uses headless Edge with synthetic Rust events and a disposable
+profile. It checks that clipboard history and the focus timer survive closing
+and reopening the panel. It does not require the desktop automation helper.
+The two upstream catalog-maintenance test modules skip when their helper scripts
+are not bundled; the shipped search and data tests still run.
+
+The logo, icon, and CIP generators require `google-genai` (and `pillow` for image
+inputs). They use Gemini's `v1beta` API for preview models and return a nonzero
+exit status when a requested output fails. Successful live generation also
+requires model quota on the supplied API key.

@@ -205,7 +205,7 @@ impl Database {
                 task.schedule.as_str(),
                 task.due_at_ms,
                 task.recurrence,
-                (task.schedule == ScheduleKind::Recurring).then_some(created_at_ms),
+                (task.schedule == ScheduleKind::Recurring).then_some(task.due_at_ms),
                 TaskStatus::Pending.as_str(),
                 created_at_ms,
             ],
@@ -221,7 +221,7 @@ impl Database {
             due_at_ms: task.due_at_ms,
             recurrence: task.recurrence.map(str::to_string),
             recurrence_start_ms: (task.schedule == ScheduleKind::Recurring)
-                .then_some(created_at_ms),
+                .then_some(task.due_at_ms),
             status: TaskStatus::Pending,
             created_at_ms,
             updated_at_ms: created_at_ms,
@@ -660,7 +660,7 @@ mod tests {
         original.schedule = ScheduleKind::Recurring;
         original.recurrence = Some("FREQ=MONTHLY");
         let task = db.insert_task(&original).expect("task inserts");
-        assert_eq!(task.recurrence_start_ms, Some(task.created_at_ms));
+        assert_eq!(task.recurrence_start_ms, Some(original.due_at_ms));
         let mut edited = fields("monthly reminder", 31);
         edited.schedule = ScheduleKind::Recurring;
         edited.recurrence = Some("FREQ=MONTHLY");

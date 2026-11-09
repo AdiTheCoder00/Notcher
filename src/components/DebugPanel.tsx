@@ -107,7 +107,7 @@ export function DebugPanel({ bindings }: Props) {
                 key={modifier.key}
                 className={`rounded-md border px-2 py-1 font-mono text-[11px] transition ${
                   snapshot[modifier.key]
-                    ? "border-accent/50 bg-accent/15 text-accent-soft"
+                    ? "border-accent/50 bg-accent/15 text-accent-text"
                     : "border-line bg-panel-raised/50 text-muted"
                 }`}
               >

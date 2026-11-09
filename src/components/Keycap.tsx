@@ -1,6 +1,6 @@
 export function Keycap({ children }: { children: string }) {
   return (
-    <kbd className="inline-flex h-6 min-w-6 items-center justify-center rounded-md border border-line bg-panel-raised px-1.5 font-sans text-[11px] font-medium tracking-wide text-zinc-300 shadow-[inset_0_-1px_0_rgba(255,255,255,0.06)]">
+    <kbd className="inline-flex h-6 min-w-6 items-center justify-center rounded-[9px] border border-line bg-panel-raised px-1.5 font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-zinc-300">
       {children}
     </kbd>
   );

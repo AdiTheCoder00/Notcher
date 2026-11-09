@@ -59,7 +59,7 @@ export function ApiKeyCard({ hasKey, onChanged }: Props) {
           </p>
         </div>
         <span className={`dashboard-api-key-status ${hasKey ? "is-ready" : "is-pending"}`}>
-          {hasKey ? "Connected" : "Not set"}
+          {hasKey ? "Key saved" : "Not set"}
         </span>
       </div>
 
@@ -88,7 +88,7 @@ export function ApiKeyCard({ hasKey, onChanged }: Props) {
           type="button"
           onClick={() => void save()}
           disabled={busy}
-          className="h-11 shrink-0 rounded-lg bg-accent px-4 text-sm font-semibold text-canvas transition hover:bg-accent-soft disabled:opacity-50"
+          className="h-11 shrink-0 rounded-lg bg-accent px-4 text-sm font-semibold text-on-accent transition hover:underline underline-offset-4 disabled:opacity-50"
         >
           {hasKey ? "Replace" : "Save key"}
         </button>

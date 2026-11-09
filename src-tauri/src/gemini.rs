@@ -18,7 +18,7 @@ use crate::scheduler::{
 const SERVICE: &str = "murmur";
 const ACCOUNT: &str = "gemini-api-key";
 
-const MODEL: &str = "gemini-2.5-flash";
+const MODEL: &str = "gemini-3.5-flash";
 const ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 /// Dictation is interactive; waiting much longer than this is worse than failing.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -61,7 +61,7 @@ impl fmt::Display for GeminiError {
             GeminiError::RateLimited => {
                 write!(
                     f,
-                    "Gemini rate limit reached — wait a moment and try again."
+                    "Gemini quota or rate limit reached — check API billing and limits, then try again."
                 )
             }
             GeminiError::NoNetwork => {
@@ -628,7 +628,10 @@ fn build_planned_task(args: CreateTaskArgs, now_ms: i64) -> Result<PlannedTask, 
             GeminiError::Decode("the recurrence rule has no next occurrence".to_string())
         })?;
 
-        (ScheduleKind::Recurring, due_at_ms, Some(rule.to_string()))
+        let rule = parsed.rule_with_month_day(rule, now_ms).ok_or_else(|| {
+            GeminiError::Decode("the recurrence anchor is outside the supported date range".into())
+        })?;
+        (ScheduleKind::Recurring, due_at_ms, Some(rule))
     } else {
         let at = args
             .schedule

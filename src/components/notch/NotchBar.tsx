@@ -91,7 +91,7 @@ export function NotchBar({ state, text, onDismiss }: Props) {
         borderRadius: state === "idle" ? "0 0 22px 22px" : RADIUS[state],
       }}
       transition={transition}
-      className="relative overflow-hidden border"
+      className={`notch-pill notch-pill--${state} relative overflow-hidden border`}
       style={{
         background:
           state === "idle"

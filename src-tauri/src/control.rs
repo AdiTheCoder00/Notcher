@@ -1,10 +1,11 @@
 //! Control Centre side effects: Windows media sessions (SMTC), master volume,
-//! monitor brightness, radio (Wi-Fi/Bluetooth), desktop wallpaper and app theme.
+//! radio (Wi-Fi/Bluetooth), desktop wallpaper and app theme.
 //!
 //! Every entry point initializes COM on its own thread because Tauri command
 //! handlers run on a pool and WinRT/Core Audio both need an apartment.
 
 use anyhow::{anyhow, Result};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
@@ -15,12 +16,14 @@ use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession, GlobalSystemMediaTransportControlsSessionManager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
 };
-use windows::Win32::Devices::Display::{
-    DestroyPhysicalMonitor, GetMonitorBrightness, GetPhysicalMonitorsFromHMONITOR,
-    SetMonitorBrightness, PHYSICAL_MONITOR,
+use windows::Win32::Foundation::{
+    CloseHandle, GetLastError, HANDLE, LPARAM, LUID, WPARAM, ERROR_NOT_ALL_ASSIGNED,
 };
-use windows::Win32::Foundation::{HANDLE, LPARAM, POINT, WPARAM};
-use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
+use windows::Win32::Security::{
+    AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, TOKEN_PRIVILEGES,
+    TOKEN_ADJUST_PRIVILEGES, TOKEN_QUERY, SE_PRIVILEGE_ENABLED, SE_SHUTDOWN_NAME,
+};
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
 use windows::Win32::System::Com::{
@@ -28,7 +31,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Power::SetSuspendState;
 use windows::Win32::System::Shutdown::{
-    ExitWindowsEx, LockWorkStation, EWX_LOGOFF, EWX_REBOOT, EWX_SHUTDOWN, SHTDN_REASON_MAJOR_OTHER,
+    ExitWindowsEx, LockWorkStation, EWX_LOGOFF, EWX_REBOOT, EWX_POWEROFF, SHTDN_REASON_MAJOR_OTHER,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     SendMessageTimeoutW, SystemParametersInfoW, HWND_BROADCAST, SMTO_ABORTIFHUNG, SPIF_SENDCHANGE,
@@ -45,8 +48,6 @@ pub struct ControlSnapshot {
     pub volume: f64,
     pub muted: bool,
     pub volume_supported: bool,
-    pub brightness: Option<u32>,
-    pub brightness_supported: bool,
     pub wifi: ToggleState,
     pub bluetooth: ToggleState,
     pub dark_mode: bool,
@@ -66,6 +67,7 @@ pub struct MediaSnapshot {
     pub playing: bool,
     pub position_seconds: Option<u64>,
     pub duration_seconds: Option<u64>,
+    pub artwork: Option<String>,
 }
 
 impl ControlSnapshot {
@@ -76,11 +78,6 @@ impl ControlSnapshot {
             Ok((volume, muted)) => (volume, muted, true),
             Err(_) => (0.0, false, false),
         };
-        let (brightness, brightness_supported) = match brightness_state() {
-            Ok(level) => (Some(level), true),
-            Err(_) => (None, false),
-        };
-
         // One radio enumeration feeds both toggles; WinRT access can be slow
         // and the panel polls this every couple of seconds.
         let radios = radios().ok();
@@ -108,8 +105,6 @@ impl ControlSnapshot {
             volume,
             muted,
             volume_supported,
-            brightness,
-            brightness_supported,
             wifi: toggle(RadioKind::WiFi),
             bluetooth: toggle(RadioKind::Bluetooth),
             dark_mode: dark_mode_enabled(),
@@ -161,6 +156,7 @@ fn media_state() -> Option<MediaSnapshot> {
         .unwrap_or((None, None));
 
     Some(MediaSnapshot {
+        artwork: media_artwork(&properties),
         title: properties
             .Title()
             .map(|value| value.to_string())
@@ -177,6 +173,35 @@ fn media_state() -> Option<MediaSnapshot> {
         position_seconds,
         duration_seconds,
     })
+}
+
+fn media_artwork(
+    properties: &windows::Media::Control::GlobalSystemMediaTransportControlsSessionMediaProperties,
+) -> Option<String> {
+    let stream = properties
+        .Thumbnail()
+        .ok()?
+        .OpenReadAsync()
+        .ok()?
+        .get()
+        .ok()?;
+    let size = stream.Size().ok()?;
+    if size == 0 || size > 2_000_000 {
+        return None;
+    }
+    let mime = stream.ContentType().ok()?.to_string();
+    if !matches!(mime.as_str(), "image/png" | "image/jpeg" | "image/webp") {
+        return None;
+    }
+    let input = stream.GetInputStreamAt(0).ok()?;
+    let reader = windows::Storage::Streams::DataReader::CreateDataReader(&input).ok()?;
+    let loaded = reader.LoadAsync(size as u32).ok()?.get().ok()?;
+    if loaded != size as u32 {
+        return None;
+    }
+    let mut data = vec![0; size as usize];
+    reader.ReadBytes(&mut data).ok()?;
+    Some(format!("data:{mime};base64,{}", STANDARD.encode(data)))
 }
 
 pub fn media_toggle() -> Result<()> {
@@ -257,64 +282,6 @@ pub fn set_muted(muted: bool) -> Result<()> {
             .map_err(|err| anyhow!("Mute: {err}"))?;
     }
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Brightness (DDC/CI through dxva2)
-// ---------------------------------------------------------------------------
-
-fn primary_physical_monitor() -> Result<HANDLE> {
-    unsafe {
-        let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-        let mut physical = [PHYSICAL_MONITOR::default(); 1];
-        GetPhysicalMonitorsFromHMONITOR(monitor, &mut physical)
-            .map_err(|err| anyhow!("Find the primary monitor: {err}"))?;
-        Ok(physical[0].hPhysicalMonitor)
-    }
-}
-
-fn brightness_state() -> Result<u32> {
-    let monitor = primary_physical_monitor()?;
-    let mut minimum = 0u32;
-    let mut current = 0u32;
-    let mut maximum = 0u32;
-    let ok = unsafe { GetMonitorBrightness(monitor, &mut minimum, &mut current, &mut maximum) };
-    let _ = unsafe { DestroyPhysicalMonitor(monitor) };
-
-    if ok == 0 || maximum <= minimum {
-        return Err(anyhow!("This monitor does not expose DDC/CI brightness"));
-    }
-    Ok(percent(current, minimum, maximum))
-}
-
-pub fn set_brightness(percent_value: u32) -> Result<()> {
-    let percent_value = percent_value.min(100);
-    let monitor = primary_physical_monitor()?;
-    let mut minimum = 0u32;
-    let mut current = 0u32;
-    let mut maximum = 0u32;
-    let readable =
-        unsafe { GetMonitorBrightness(monitor, &mut minimum, &mut current, &mut maximum) };
-    if readable == 0 || maximum <= minimum {
-        let _ = unsafe { DestroyPhysicalMonitor(monitor) };
-        return Err(anyhow!("This monitor does not expose DDC/CI brightness"));
-    }
-
-    let target = minimum + ((maximum - minimum) * percent_value) / 100;
-    let ok = unsafe { SetMonitorBrightness(monitor, target) };
-    let _ = unsafe { DestroyPhysicalMonitor(monitor) };
-
-    if ok == 0 {
-        return Err(anyhow!("The monitor refused the brightness change"));
-    }
-    Ok(())
-}
-
-fn percent(value: u32, minimum: u32, maximum: u32) -> u32 {
-    if maximum <= minimum {
-        return 0;
-    }
-    (((value.saturating_sub(minimum)) * 100) / (maximum - minimum)).min(100)
 }
 
 // ---------------------------------------------------------------------------
@@ -438,6 +405,13 @@ pub fn set_wallpaper(data_dir: &Path, preset: &str) -> Result<()> {
         }
     }
 
+    set_wallpaper_file(&path)
+}
+
+pub fn set_wallpaper_file(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Err(anyhow!("Wallpaper file does not exist"));
+    }
     let wallpaper: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     unsafe {
         SystemParametersInfoW(
@@ -487,8 +461,48 @@ fn write_gradient_wallpaper(path: &Path, start: [u8; 3], end: [u8; 3]) -> Result
     Ok(())
 }
 
+fn with_shutdown_privilege(action: impl FnOnce() -> Result<()>) -> Result<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().map_err(|_| anyhow!("Power action lock poisoned"))?;
+    let mut token = HANDLE::default();
+    unsafe {
+        OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token)?;
+    }
+    let result = (|| -> Result<()> {
+        let mut luid = LUID::default();
+        unsafe { LookupPrivilegeValueW(None, SE_SHUTDOWN_NAME, &mut luid)? };
+        let requested = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: SE_PRIVILEGE_ENABLED,
+            }],
+        };
+        let mut previous = TOKEN_PRIVILEGES::default();
+        let mut returned = 0;
+        unsafe {
+            AdjustTokenPrivileges(
+                token, false, Some(&requested),
+                std::mem::size_of::<TOKEN_PRIVILEGES>() as u32,
+                Some(&mut previous), Some(&mut returned),
+            )?;
+            if GetLastError() == ERROR_NOT_ALL_ASSIGNED {
+                return Err(anyhow!("This Windows account cannot change the system power state"));
+            }
+        }
+        let result = action();
+        let restored = unsafe { AdjustTokenPrivileges(token, false, Some(&previous), 0, None, None) };
+        if let Err(err) = restored {
+            return Err(anyhow!("Could not restore the Windows shutdown privilege: {err}; action result: {result:?}"));
+        }
+        result
+    })();
+    unsafe { CloseHandle(token)? };
+    result
+}
+
 pub fn power_action(action: &str) -> Result<()> {
-    match action {
+    let execute = || match action {
         "lock" => unsafe { LockWorkStation().map_err(|err| anyhow!("Lock Windows: {err}")) },
         "sleep" => {
             let suspended = unsafe { SetSuspendState(false, false, false) };
@@ -506,10 +520,15 @@ pub fn power_action(action: &str) -> Result<()> {
                 .map_err(|err| anyhow!("Restart Windows: {err}"))
         },
         "shutdown" => unsafe {
-            ExitWindowsEx(EWX_SHUTDOWN, SHTDN_REASON_MAJOR_OTHER)
+            ExitWindowsEx(EWX_POWEROFF, SHTDN_REASON_MAJOR_OTHER)
                 .map_err(|err| anyhow!("Shut down Windows: {err}"))
         },
         other => Err(anyhow!("Unknown power action: {other}")),
+    };
+    if matches!(action, "sleep" | "restart" | "shutdown") {
+        with_shutdown_privilege(execute)
+    } else {
+        execute()
     }
 }
 
@@ -517,13 +536,43 @@ pub fn power_action(action: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn shutdown_privilege_enabled() -> bool {
+        use windows::Win32::Foundation::BOOL;
+        use windows::Win32::Security::{PrivilegeCheck, PRIVILEGE_SET};
+        let mut token = HANDLE::default();
+        let mut luid = LUID::default();
+        unsafe {
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).unwrap();
+            LookupPrivilegeValueW(None, SE_SHUTDOWN_NAME, &mut luid).unwrap();
+            let mut privileges = PRIVILEGE_SET {
+                PrivilegeCount: 1,
+                Control: 1,
+                Privilege: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }],
+            };
+            let mut enabled = BOOL::default();
+            let result = PrivilegeCheck(token, &mut privileges, &mut enabled);
+            CloseHandle(token).unwrap();
+            result.unwrap();
+            enabled.as_bool()
+        }
+    }
+
     #[test]
-    fn brightness_percent_maps_the_hardware_range() {
-        assert_eq!(percent(0, 0, 100), 0);
-        assert_eq!(percent(50, 0, 100), 50);
-        assert_eq!(percent(100, 0, 100), 100);
-        assert_eq!(percent(15, 10, 20), 50);
-        assert_eq!(percent(5, 10, 10), 0);
+    fn shutdown_privilege_is_restored_after_an_action_error() {
+        let before = shutdown_privilege_enabled();
+        let mut called = false;
+        let error = with_shutdown_privilege(|| {
+            called = true;
+            assert!(shutdown_privilege_enabled());
+            Err(anyhow!("simulated power action failure"))
+        }).unwrap_err();
+        assert_eq!(shutdown_privilege_enabled(), before);
+        if called {
+            assert_eq!(error.to_string(), "simulated power action failure");
+        } else {
+            assert!(error.to_string().contains("account cannot change"), "{error:#}");
+        }
+        assert!(power_action("invalid").is_err());
     }
 
     #[test]

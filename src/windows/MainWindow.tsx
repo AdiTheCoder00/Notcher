@@ -83,6 +83,7 @@ export default function MainWindow() {
   });
 
   const savedJson = useRef<string | null>(null);
+  const saveQueue = useRef<Promise<void>>(Promise.resolve());
   const loadoutAnchor = useRef<HTMLDivElement | null>(null);
 
   const refresh = useCallback(async () => {
@@ -92,20 +93,24 @@ export default function MainWindow() {
       return;
     }
     try {
-      const [keyStatus, list, saved] = await Promise.all([
+      const [keyStatus, list, saved] = await Promise.allSettled([
         api.apiKeyStatus(),
         api.listTasks(),
         api.getLoadout(),
       ]);
-      setHasKey(keyStatus);
-      setTasks(list);
-      setLoadout(saved);
-      savedJson.current = JSON.stringify(saved);
+      if (keyStatus.status === "fulfilled") setHasKey(keyStatus.value);
+      if (list.status === "fulfilled") setTasks(list.value);
+      if (saved.status === "fulfilled") {
+        setLoadout(saved.value);
+        savedJson.current = JSON.stringify(saved.value);
+        setLoadoutReady(true);
+      }
+      const failures = [keyStatus, list, saved].filter((result) => result.status === "rejected");
+      if (failures.length) setNotice(failures.map((result) => String(result.reason)).join("; "));
     } catch (err) {
       setNotice(String(err));
     } finally {
       setLoaded(true);
-      setLoadoutReady(true);
     }
   }, []);
 
@@ -145,20 +150,29 @@ export default function MainWindow() {
   useEffect(() => {
     if (!loadoutReady) return;
     const json = JSON.stringify(loadout);
-    if (savedJson.current === json) return;
-
     const timer = window.setTimeout(() => {
       if (!isTauri()) {
         savedJson.current = json;
         return;
       }
-      api
-        .saveLoadout(loadout)
-        .then((saved) => {
+      saveQueue.current = saveQueue.current.then(async () => {
+        if (savedJson.current === json) return;
+        try {
+          const previous = savedJson.current ? JSON.parse(savedJson.current) as Loadout : null;
+          const patch: Partial<Loadout> = {};
+          for (const key of ["voice", "hotkeys", "persona", "apps", "theme"] as const) {
+            if (!previous || JSON.stringify(previous[key]) !== JSON.stringify(loadout[key])) {
+              Object.assign(patch, { [key]: loadout[key] });
+            }
+          }
+          if (!Object.keys(patch).length) return;
+          const saved = await api.patchLoadout(patch);
           savedJson.current = JSON.stringify(saved);
-          setLoadout(saved);
-        })
-        .catch((err) => setNotice(String(err)));
+          setLoadout((current) => JSON.stringify(current) === json ? saved : current);
+        } catch (err) {
+          setNotice(String(err));
+        }
+      });
     }, 450);
 
     return () => window.clearTimeout(timer);
@@ -166,6 +180,21 @@ export default function MainWindow() {
 
   useRustEvent(EVENTS.taskDue, () => {
     void refreshTasks();
+  });
+
+  useRustEvent(EVENTS.loadoutChanged, (remote) => {
+    if (!savedJson.current) return;
+    const previous = JSON.parse(savedJson.current) as Loadout;
+    savedJson.current = JSON.stringify(remote);
+    setLoadout((current) => {
+      const merged = { ...current };
+      for (const key of ["voice", "hotkeys", "persona", "apps", "theme"] as const) {
+        if (JSON.stringify(current[key]) === JSON.stringify(previous[key])) {
+          Object.assign(merged, { [key]: remote[key] });
+        }
+      }
+      return merged;
+    });
   });
 
   useRustEvent(EVENTS.loadoutFocus, () => {
@@ -291,8 +320,11 @@ export default function MainWindow() {
 
         <div className="dashboard-sidebar-bottom">
           <div className="dashboard-sidebar-status">
-            <span className={`dashboard-status-mark ${hasKey ? "is-ready" : "is-pending"}`} />
-            <span>{hasKey ? "Assistant ready" : "Setup required"}</span>
+            <span
+              className={`dashboard-status-mark ${hasKey ? "is-ready" : "is-pending"}`}
+              aria-hidden="true"
+            />
+            <span>{hasKey ? "Key saved" : "Setup required"}</span>
           </div>
           <p>Audio stays on your device until you ask Murmur to process it.</p>
         </div>
@@ -312,7 +344,7 @@ export default function MainWindow() {
           >
             <span className="dashboard-status-mark" />
             <span>
-              {loaded ? (hasKey ? "Connected" : "Connect an API key") : "Checking connection"}
+              {loaded ? (hasKey ? "Key saved" : "Connect an API key") : "Checking saved key"}
             </span>
             <ChevronRightIcon size={14} />
           </a>
@@ -339,6 +371,14 @@ export default function MainWindow() {
                 <a className="dashboard-text-link" href="#hotkeys">
                   View shortcuts <ChevronRightIcon size={14} />
                 </a>
+                <button
+                  type="button"
+                  className="dashboard-subtle-button"
+                  disabled={!isTauri()}
+                  onClick={() => void api.openLauncher().catch((err) => setNotice(String(err)))}
+                >
+                  Open Control Centre
+                </button>
               </div>
             </div>
 
@@ -393,9 +433,9 @@ export default function MainWindow() {
 
           <div className="dashboard-metrics" aria-label="Workspace summary">
             <div className="dashboard-metric">
-              <span>Connection</span>
+              <span>API key</span>
               <strong className={hasKey ? "metric-ready" : "metric-pending"}>
-                {loaded ? (hasKey ? "Ready" : "Needs setup") : "Checking"}
+                {loaded ? (hasKey ? "Saved" : "Needs setup") : "Checking"}
               </strong>
             </div>
             <div className="dashboard-metric">
@@ -418,17 +458,24 @@ export default function MainWindow() {
           ) : null}
 
           <div id="connection" className="dashboard-anchor">
-            <ApiKeyCard hasKey={hasKey} onChanged={() => void refresh()} />
+            <ApiKeyCard hasKey={hasKey} onChanged={() => {
+              void api.apiKeyStatus().then(setHasKey).catch((err) => setNotice(String(err)));
+            }} />
           </div>
 
           <div id="loadout" ref={loadoutAnchor} className="dashboard-anchor">
-            <LoadoutSection
-              loadout={loadout}
-              onChange={setLoadout}
-              onNotice={(message) => {
-                if (message) setNotice(message);
-              }}
-            />
+            <fieldset disabled={!loadoutReady} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
+              <LoadoutSection
+                loadout={loadout}
+                onChange={setLoadout}
+                onNotice={(message) => {
+                  if (message) setNotice(message);
+                }}
+              />
+            </fieldset>
+            {loaded && !loadoutReady ? (
+              <p role="status">Loadout could not be loaded. Restart Murmur to try again.</p>
+            ) : null}
           </div>
 
           <div className="dashboard-work-grid">
@@ -482,7 +529,12 @@ export default function MainWindow() {
                   <h2>Scheduled</h2>
                   <p>Reminders and tasks you asked Murmur to handle.</p>
                 </div>
-                <span className="dashboard-count">{loaded ? activeTasks : "…"}</span>
+                <span className="dashboard-count" aria-hidden="true">
+                  {loaded ? activeTasks : "…"}
+                </span>
+                <span className="sr-only" aria-live="polite">
+                  {loaded ? `${activeTasks} active tasks` : "Loading active tasks"}
+                </span>
               </div>
               <div className="mt-4">
                 <TaskList

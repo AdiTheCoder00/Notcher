@@ -20,6 +20,7 @@ interface Props {
 export function AnswerCard({ markdown, onDismiss }: Props) {
   const [paused, setPaused] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const progress = useDismissTimer({ durationMs: AUTO_DISMISS_MS, paused, onDone: onDismiss });
 
   const copy = useCallback(async () => {
@@ -29,10 +30,12 @@ export function AnswerCard({ markdown, onDismiss }: Props) {
       } else {
         await navigator.clipboard.writeText(markdown);
       }
+      setCopyFailed(false);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1600);
     } catch {
-      // Clipboard access can be refused; the card stays usable either way.
+      setCopied(false);
+      setCopyFailed(true);
     }
   }, [markdown]);
 
@@ -46,23 +49,23 @@ export function AnswerCard({ markdown, onDismiss }: Props) {
       exit={{ opacity: 0 }}
       transition={{ duration: 0.14 }}
     >
-      <div className="flex items-start gap-3 px-4 pt-3.5">
-        <div className="notch-md min-w-0 flex-1 overflow-y-auto" style={{ maxHeight: 176 }}>
-          <Markdown remarkPlugins={[remarkGfm]}>{markdown}</Markdown>
-        </div>
-
+      <div className="notch-answer-header">
+        <span className="notch-answer-label"><span aria-hidden="true" /> MURMUR <i aria-hidden="true">/</i> ANSWER</span>
         <button
           type="button"
           onClick={() => void copy()}
-          className="shrink-0 rounded-md border px-2 py-1 text-[11px] font-medium transition hover:opacity-80"
+          className="notch-copy-button"
           style={{
             borderColor: "var(--notch-border)",
             background: "color-mix(in oklab, var(--notch-text) 6%, transparent)",
             color: copied ? "var(--notch-accent)" : "var(--notch-muted)",
           }}
         >
-          {copied ? "Copied" : "Copy"}
+          {copyFailed ? "Copy failed — retry" : copied ? "Copied" : "Copy"}
         </button>
+      </div>
+      <div className="notch-md min-w-0 overflow-y-auto px-4 pb-1" style={{ maxHeight: 176 }}>
+        <Markdown remarkPlugins={[remarkGfm]}>{markdown}</Markdown>
       </div>
 
       <div

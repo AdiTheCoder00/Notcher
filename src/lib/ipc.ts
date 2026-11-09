@@ -120,6 +120,8 @@ export interface AppSettings {
 export interface InstalledApp {
   name: string;
   target: string;
+  /** PNG data URL of the shell icon, when Windows resolves one. */
+  icon: string | null;
 }
 
 export type ThemeMode = "system" | "dark" | "light";
@@ -151,6 +153,7 @@ export interface MediaSnapshot {
   playing: boolean;
   position_seconds: number | null;
   duration_seconds: number | null;
+  artwork: string | null;
 }
 
 /** System state for the Control Centre. */
@@ -159,8 +162,6 @@ export interface ControlSnapshot {
   volume: number;
   muted: boolean;
   volume_supported: boolean;
-  brightness: number | null;
-  brightness_supported: boolean;
   wifi: ToggleState;
   bluetooth: ToggleState;
   dark_mode: boolean;
@@ -188,14 +189,6 @@ export const api = {
   clearApiKey: () => invoke<void>("clear_api_key"),
 
   listTasks: () => invoke<ScheduledTask[]>("list_tasks"),
-  createTask: (task: Omit<TaskUpdate, "id">) =>
-    invoke<ScheduledTask>("create_task", {
-      prompt: task.prompt,
-      dueAtMs: task.due_at_ms,
-      action: task.action,
-      payload: task.payload,
-      recurrence: task.recurrence,
-    }),
   updateTask: (task: TaskUpdate) =>
     invoke<ScheduledTask>("update_task", {
       id: task.id,
@@ -229,11 +222,14 @@ export const api = {
 
   getLoadout: () => invoke<Loadout>("get_loadout"),
   saveLoadout: (loadout: Loadout) => invoke<Loadout>("save_loadout", { loadout }),
+  patchLoadout: (patch: Partial<Loadout>) => invoke<Loadout>("patch_loadout", { patch }),
   exportLoadout: () => invoke<string>("export_loadout"),
   importLoadout: (json: string) => invoke<Loadout>("import_loadout", { json }),
 
   controlSnapshot: () => invoke<ControlSnapshot>("control_snapshot"),
   openControlCentre: () => invoke<void>("open_control_centre"),
+  openNotchPeek: () => invoke<void>("open_notch_peek"),
+  closeNotchPeek: () => invoke<void>("close_notch_peek"),
   openLauncher: () => invoke<void>("open_launcher"),
   closeControlCentre: () => invoke<void>("close_control_centre"),
   mediaToggle: () => invoke<void>("media_toggle"),
@@ -241,7 +237,6 @@ export const api = {
   mediaPrevious: () => invoke<void>("media_previous"),
   setVolume: (level: number) => invoke<void>("set_volume", { level }),
   setMuted: (muted: boolean) => invoke<void>("set_muted", { muted }),
-  setBrightness: (value: number) => invoke<void>("set_brightness", { value }),
   setRadioEnabled: (kind: "wifi" | "bluetooth", enabled: boolean) =>
     invoke<void>("set_radio_enabled", { kind, enabled }),
   setDarkMode: (enabled: boolean) => invoke<void>("set_dark_mode", { enabled }),

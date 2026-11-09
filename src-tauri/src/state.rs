@@ -4,6 +4,7 @@ use std::time::Instant;
 use crate::audio::{AudioClip, Meter, Recorder};
 use crate::db::Database;
 use crate::gemini;
+use crate::hotkeys::Gesture;
 use crate::screen;
 
 /// One in-flight circle-to-ask gesture. The screenshot is taken before the
@@ -29,8 +30,11 @@ pub struct CircleConversation {
 /// Process-wide state managed by Tauri.
 pub struct AppState {
     pub db: Database,
+    /// Kept through selection and processing; the lock serializes every finish path.
+    pub gesture: tokio::sync::Mutex<Option<Gesture>>,
     /// One recorder: the gestures are mutually exclusive by design.
     pub recorder: Mutex<Recorder>,
+    pub dictation_target: Mutex<Option<isize>>,
     /// Peak meter shared with the audio callback and the UI ticker.
     pub meter: Arc<Meter>,
     /// The circle gesture is a two-step capture (keys + loop), so its parts are
@@ -44,7 +48,9 @@ impl AppState {
         let meter = Arc::new(Meter::default());
         Self {
             db,
+            gesture: tokio::sync::Mutex::new(None),
             recorder: Mutex::new(Recorder::new(Arc::clone(&meter))),
+            dictation_target: Mutex::new(None),
             meter,
             circle: Mutex::new(None),
             conversation: Mutex::new(None),

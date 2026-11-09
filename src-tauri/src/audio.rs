@@ -11,7 +11,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -189,6 +189,12 @@ pub fn spawn_meter(app: AppHandle, meter: Arc<Meter>) {
             }
 
             let status = meter.status();
+            if changed && !recording {
+                if let Some(error) = status.error.as_deref() {
+                    let _ = crate::notch::show(&app, crate::notch::NotchState::Error, Some(error));
+                    crate::notch::idle_later(app.clone(), Duration::from_secs(3));
+                }
+            }
             let payload = AudioStatus {
                 level: decayed,
                 ..status
@@ -332,7 +338,7 @@ impl Recorder {
     }
 
     /// Stops the stream, joins the capture thread and returns a 16 kHz mono
-    /// i16 clip. Fails only if nothing was recording.
+    /// i16 clip. Rejects incomplete recordings after a capture failure.
     pub fn stop(&mut self) -> Result<AudioClip> {
         let Some(mut session) = self.session.take() else {
             self.meter.set_recording(false);
@@ -342,12 +348,15 @@ impl Recorder {
         session.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = session.handle.take() {
             if handle.join().is_err() {
-                eprintln!("[audio] capture thread panicked");
+                self.meter.set_error(Some("The microphone capture thread failed".into()));
             }
         }
 
         self.meter.set_recording(false);
         let _ = self.meter.take_level();
+        if let Some(error) = self.meter.status().error {
+            return Err(anyhow!(error));
+        }
         if session.limit_reached.load(Ordering::SeqCst) {
             return Err(anyhow!(
                 "recording reached the 60-second limit; release the shortcut and try a shorter clip"
@@ -381,19 +390,34 @@ fn capture_thread(
     meter: Arc<Meter>,
     ready: mpsc::Sender<Result<ReadyInfo>>,
 ) {
-    match build_stream(buffer, Arc::clone(&limit_reached), Arc::clone(&meter)) {
+    match build_stream(buffer, Arc::clone(&limit_reached), Arc::clone(&meter), Arc::clone(&stop)) {
         Ok((stream, info)) => {
             if ready.send(Ok(info)).is_err() {
                 return;
             }
-            while !stop.load(Ordering::SeqCst) {
-                thread::sleep(JOIN_POLL);
-            }
+            wait_for_capture_end(&stop, &limit_reached, MAX_RECORDING_DURATION);
             drop(stream);
+            if limit_reached.load(Ordering::SeqCst) {
+                meter.set_error(Some(
+                    "Recording reached the 60-second limit; try a shorter clip".into(),
+                ));
+            }
+            meter.set_recording(false);
         }
         Err(err) => {
             let _ = ready.send(Err(err));
         }
+    }
+}
+
+fn wait_for_capture_end(stop: &AtomicBool, limit_reached: &AtomicBool, duration: Duration) {
+    let started = Instant::now();
+    while !stop.load(Ordering::SeqCst) && !limit_reached.load(Ordering::SeqCst) {
+        if started.elapsed() >= duration {
+            limit_reached.store(true, Ordering::SeqCst);
+            break;
+        }
+        thread::sleep(JOIN_POLL);
     }
 }
 
@@ -440,6 +464,7 @@ fn build_stream(
     buffer: Arc<Mutex<Vec<f32>>>,
     limit_reached: Arc<AtomicBool>,
     meter: Arc<Meter>,
+    stop: Arc<AtomicBool>,
 ) -> Result<(cpal::Stream, ReadyInfo)> {
     let host = cpal::default_host();
     let device = host
@@ -457,6 +482,8 @@ fn build_stream(
         })
         .ok_or_else(|| anyhow!("the microphone format has an unsupported sample rate"))?;
 
+    let error_meter = Arc::clone(&meter);
+    let on_error = move |err| record_stream_error(&error_meter, &stop, err);
     let stream = match chosen.format {
         cpal::SampleFormat::F32 => {
             let sink = Arc::clone(&buffer);
@@ -476,7 +503,7 @@ fn build_stream(
                     );
                     peak_meter.report_peak(peak);
                 },
-                |err| eprintln!("[audio] stream error: {err}"),
+                on_error,
                 None,
             )
         }
@@ -498,7 +525,7 @@ fn build_stream(
                     );
                     peak_meter.report_peak(peak);
                 },
-                |err| eprintln!("[audio] stream error: {err}"),
+                on_error,
                 None,
             )
         }
@@ -521,7 +548,7 @@ fn build_stream(
                     );
                     peak_meter.report_peak(peak);
                 },
-                |err| eprintln!("[audio] stream error: {err}"),
+                on_error,
                 None,
             )
         }
@@ -541,6 +568,11 @@ fn build_stream(
             device: device_name,
         },
     ))
+}
+
+fn record_stream_error(meter: &Meter, stop: &AtomicBool, error: cpal::StreamError) {
+    meter.set_error(Some(format!("Microphone recording failed: {error}")));
+    stop.store(true, Ordering::SeqCst);
 }
 
 fn append_samples(
@@ -611,6 +643,39 @@ fn to_pcm16(sample: f32) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_failure_rejects_a_partial_clip() {
+        let meter = Arc::new(Meter::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut recorder = Recorder::new(Arc::clone(&meter));
+        recorder.session = Some(Session {
+            buffer: Arc::new(Mutex::new(vec![0.1; 16_000])),
+            limit_reached: Arc::new(AtomicBool::new(false)),
+            stop: Arc::clone(&stop),
+            handle: None,
+            source_rate: 16_000,
+            source_channels: 1,
+        });
+        record_stream_error(&meter, &stop, cpal::StreamError::DeviceNotAvailable);
+        assert!(stop.load(Ordering::SeqCst));
+        assert!(recorder.stop().unwrap_err().to_string().contains("Microphone recording failed"));
+        assert!(!recorder.is_recording());
+    }
+
+    #[test]
+    fn capture_wait_stops_on_either_the_sample_limit_or_deadline() {
+        let stop = AtomicBool::new(false);
+        let limit = AtomicBool::new(true);
+        wait_for_capture_end(&stop, &limit, Duration::from_secs(60));
+        limit.store(false, Ordering::SeqCst);
+        wait_for_capture_end(&stop, &limit, Duration::ZERO);
+        assert!(limit.load(Ordering::SeqCst));
+        limit.store(false, Ordering::SeqCst);
+        stop.store(true, Ordering::SeqCst);
+        wait_for_capture_end(&stop, &limit, Duration::from_secs(60));
+        assert!(!limit.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn recording_buffer_stops_at_its_limit() {

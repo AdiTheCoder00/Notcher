@@ -30,7 +30,7 @@ export function defaultLoadout(): Loadout {
     },
     persona: { preset: "assistant", name: "Murmur", instructions: "" },
     apps: { pinned: ["Spotify", "Notepad", "Settings"] },
-    theme: { mode: "system", accent: "#7c8cff" },
+    theme: { mode: "system", accent: "#d0ad5e" },
   };
 }
 
@@ -48,13 +48,22 @@ export function applyTheme(theme: ThemeSettings): void {
     const dark = theme.mode === "dark" || (theme.mode === "system" && !media.matches);
     root.dataset.theme = dark ? "dark" : "light";
     root.style.colorScheme = dark ? "dark" : "light";
+    // Soft accent is used as ink in the Loadout map: pale reads on the dark
+    // canvas, but on white it needs to mix toward the palette foreground.
+    root.style.setProperty(
+      "--color-accent-soft",
+      dark
+        ? `color-mix(in oklab, ${theme.accent} 68%, white)`
+        : `color-mix(in oklab, ${theme.accent} 55%, #0f172a)`,
+    );
   };
 
   root.style.setProperty("--color-accent", theme.accent);
-  root.style.setProperty(
-    "--color-accent-soft",
-    `color-mix(in oklab, ${theme.accent} 68%, white)`,
-  );
+  const luminance = ([[1, 0.2126], [3, 0.7152], [5, 0.0722]] as const).reduce((sum, [offset, weight]) => {
+    const channel = parseInt(theme.accent.slice(offset, offset + 2), 16) / 255;
+    return sum + weight * (channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+  }, 0);
+  root.style.setProperty("--color-on-accent", luminance > 0.179 ? "#000000" : "#ffffff");
   root.style.setProperty("--notch-accent", theme.accent);
   paint();
 

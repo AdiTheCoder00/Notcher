@@ -19,14 +19,17 @@ arboard = "3"
 base64 = "0.22"
 chrono = "0.4"
 cpal = "0.15"
+drag = "2.1"
 enigo = "0.6"
 iana-time-zone = "0.1"
 keyring = { version = "3", features = ["windows-native"] }
 png = "0.17"
+rfd = "0.15"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sysinfo = "0.33"
 tauri = { version = "2", features = [] }
 tauri-plugin-notification = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
@@ -39,7 +42,7 @@ windows = { version = "0.58", features = [
   "Foundation",
   "Foundation_Collections",
   "Media_Control",
-  "Win32_Devices_Display",
+  "Storage_Streams",
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_Media_Audio",
@@ -47,6 +50,8 @@ windows = { version = "0.58", features = [
   "Win32_Security",
   "Win32_System_Com",
   "Win32_System_Com_StructuredStorage",
+  "Win32_Storage_FileSystem",
+  "Win32_System_DataExchange",
   "Win32_System_Power",
   "Win32_System_Shutdown",
   "Win32_System_Threading",

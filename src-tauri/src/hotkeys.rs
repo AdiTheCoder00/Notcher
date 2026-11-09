@@ -165,6 +165,100 @@ pub enum HotkeyEvent {
     State(HotkeySnapshot),
 }
 
+#[derive(Default)]
+pub struct GestureTracker {
+    active: Option<Gesture>,
+}
+
+impl GestureTracker {
+    /// Ignore busy key edges instead of recording them after the request finishes.
+    pub fn filter(&mut self, event: HotkeyEvent, hold: bool, busy: bool) -> Option<HotkeyEvent> {
+        match event {
+            HotkeyEvent::State(_) => Some(event),
+            HotkeyEvent::Pressed(gesture) => {
+                if !hold && gesture != Gesture::CircleToAsk {
+                    if let Some(active) = self.active.take() {
+                        return Some(HotkeyEvent::Released(active));
+                    }
+                }
+                if busy || self.active.is_some() {
+                    return None;
+                }
+                self.active = Some(gesture);
+                Some(event)
+            }
+            HotkeyEvent::Released(gesture)
+                if self.active == Some(gesture) && (hold || gesture == Gesture::CircleToAsk) =>
+            {
+                self.active = None;
+                Some(event)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod gesture_tests {
+    use super::*;
+
+    #[test]
+    fn busy_gestures_are_never_replayed_or_finished_later() {
+        let mut tracker = GestureTracker::default();
+        assert_eq!(
+            tracker.filter(HotkeyEvent::Pressed(Gesture::Dictation), true, true),
+            None
+        );
+        assert_eq!(
+            tracker.filter(HotkeyEvent::Released(Gesture::Dictation), true, false),
+            None
+        );
+        assert_eq!(
+            tracker.filter(HotkeyEvent::Pressed(Gesture::Dictation), true, false),
+            Some(HotkeyEvent::Pressed(Gesture::Dictation))
+        );
+        assert_eq!(
+            tracker.filter(HotkeyEvent::Released(Gesture::Dictation), true, false),
+            Some(HotkeyEvent::Released(Gesture::Dictation))
+        );
+    }
+
+    #[test]
+    fn tap_stop_keeps_the_gesture_that_started_the_recording() {
+        let mut tracker = GestureTracker::default();
+        assert_eq!(
+            tracker.filter(HotkeyEvent::Pressed(Gesture::Dictation), false, false),
+            Some(HotkeyEvent::Pressed(Gesture::Dictation))
+        );
+        assert_eq!(
+            tracker.filter(HotkeyEvent::Released(Gesture::Dictation), false, false),
+            None
+        );
+        assert_eq!(
+            tracker.filter(HotkeyEvent::Pressed(Gesture::ScheduleTask), false, true),
+            Some(HotkeyEvent::Released(Gesture::Dictation))
+        );
+        assert_eq!(
+            tracker.filter(HotkeyEvent::Released(Gesture::ScheduleTask), false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_pending_circle_blocks_new_recordings_after_key_release() {
+        let mut tracker = GestureTracker::default();
+        let press = HotkeyEvent::Pressed(Gesture::CircleToAsk);
+        let release = HotkeyEvent::Released(Gesture::CircleToAsk);
+        assert_eq!(tracker.filter(press, true, false), Some(press));
+        assert_eq!(tracker.filter(release, true, true), Some(release));
+        for gesture in [Gesture::Dictation, Gesture::ScheduleTask, Gesture::CircleToAsk] {
+            assert_eq!(tracker.filter(HotkeyEvent::Pressed(gesture), true, true), None);
+            assert_eq!(tracker.filter(HotkeyEvent::Released(gesture), true, true), None);
+        }
+        assert_eq!(tracker.filter(press, true, false), Some(press));
+    }
+}
+
 static SENDER: OnceLock<UnboundedSender<HotkeyEvent>> = OnceLock::new();
 /// The hook reads this on every key edge, so a Loadout edit takes effect
 /// without restarting the listener thread.

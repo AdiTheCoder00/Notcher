@@ -8,7 +8,7 @@ import type {
 } from "../lib/ipc";
 
 const STATUS_STYLES: Record<TaskStatus, string> = {
-  pending: "bg-accent/10 text-accent-soft ring-accent/25",
+  pending: "bg-accent/10 text-accent-text ring-accent/25",
   paused: "bg-amber-500/10 text-amber-300 ring-amber-500/25",
   running: "bg-sky-500/10 text-sky-300 ring-sky-500/25",
   done: "bg-emerald-500/10 text-emerald-300 ring-emerald-500/25",
@@ -174,10 +174,11 @@ export function TaskList({ tasks, onPause, onResume, onDelete, onSave }: Props) 
             {editingId === task.id && draft ? (
               <form className="space-y-3 px-4 py-4" onSubmit={(event) => void submitEdit(event, task)}>
                 <div>
-                  <label className="text-[11px] font-medium uppercase tracking-wide text-muted">
+                  <label htmlFor={`task-${task.id}-prompt`} className="text-[11px] font-medium uppercase tracking-wide text-muted">
                     Task
                   </label>
                   <input
+                    id={`task-${task.id}-prompt`}
                     value={draft.prompt}
                     onChange={(event) => setDraft({ ...draft, prompt: event.target.value })}
                     className="mt-1 w-full rounded-lg border border-line bg-panel px-3 py-2 text-sm text-zinc-200 outline-none focus:border-accent/50"
@@ -186,10 +187,11 @@ export function TaskList({ tasks, onPause, onResume, onDelete, onSave }: Props) 
 
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div>
-                    <label className="text-[11px] font-medium uppercase tracking-wide text-muted">
+                    <label htmlFor={`task-${task.id}-schedule`} className="text-[11px] font-medium uppercase tracking-wide text-muted">
                       Schedule
                     </label>
                     <select
+                      id={`task-${task.id}-schedule`}
                       value={draft.schedule}
                       onChange={(event) =>
                         setDraft({
@@ -204,10 +206,11 @@ export function TaskList({ tasks, onPause, onResume, onDelete, onSave }: Props) 
                     </select>
                   </div>
                   <div>
-                    <label className="text-[11px] font-medium uppercase tracking-wide text-muted">
+                    <label htmlFor={`task-${task.id}-due`} className="text-[11px] font-medium uppercase tracking-wide text-muted">
                       {draft.schedule === "recurring" ? "Next run" : "Due"}
                     </label>
                     <input
+                      id={`task-${task.id}-due`}
                       type="datetime-local"
                       value={draft.due}
                       onChange={(event) => setDraft({ ...draft, due: event.target.value })}
@@ -218,10 +221,11 @@ export function TaskList({ tasks, onPause, onResume, onDelete, onSave }: Props) 
 
                 {draft.schedule === "recurring" ? (
                   <div>
-                    <label className="text-[11px] font-medium uppercase tracking-wide text-muted">
+                    <label htmlFor={`task-${task.id}-recurrence`} className="text-[11px] font-medium uppercase tracking-wide text-muted">
                       Recurrence (RFC 5545 RRULE)
                     </label>
                     <input
+                      id={`task-${task.id}-recurrence`}
                       value={draft.recurrence}
                       onChange={(event) =>
                         setDraft({ ...draft, recurrence: event.target.value })
@@ -234,10 +238,11 @@ export function TaskList({ tasks, onPause, onResume, onDelete, onSave }: Props) 
 
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div>
-                    <label className="text-[11px] font-medium uppercase tracking-wide text-muted">
+                    <label htmlFor={`task-${task.id}-action`} className="text-[11px] font-medium uppercase tracking-wide text-muted">
                       Action
                     </label>
                     <select
+                      id={`task-${task.id}-action`}
                       value={draft.action}
                       onChange={(event) =>
                         setDraft({ ...draft, action: event.target.value as ActionKind })
@@ -252,10 +257,11 @@ export function TaskList({ tasks, onPause, onResume, onDelete, onSave }: Props) 
                     </select>
                   </div>
                   <div>
-                    <label className="text-[11px] font-medium uppercase tracking-wide text-muted">
+                    <label htmlFor={`task-${task.id}-payload`} className="text-[11px] font-medium uppercase tracking-wide text-muted">
                       Payload
                     </label>
                     <input
+                      id={`task-${task.id}-payload`}
                       value={draft.payload}
                       onChange={(event) => setDraft({ ...draft, payload: event.target.value })}
                       placeholder={ACTION_HINTS[draft.action]}
@@ -275,7 +281,7 @@ export function TaskList({ tasks, onPause, onResume, onDelete, onSave }: Props) 
                   <button
                     type="submit"
                     disabled={saving}
-                    className="rounded-md border border-accent/35 bg-accent/10 px-2.5 py-1.5 text-xs font-medium text-accent-soft transition hover:bg-accent/15 disabled:opacity-50"
+                    className="rounded-md border border-accent/35 bg-accent/10 px-2.5 py-1.5 text-xs font-medium text-accent-text transition hover:bg-accent/15 disabled:opacity-50"
                   >
                     {saving ? "Saving…" : "Save changes"}
                   </button>
@@ -292,8 +298,13 @@ export function TaskList({ tasks, onPause, onResume, onDelete, onSave }: Props) 
                 </span>
 
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-zinc-100">{task.prompt}</p>
-                  <p className="mt-1 truncate text-xs text-muted">
+                  <p className="truncate text-sm font-medium text-zinc-100" title={task.prompt}>
+                    {task.prompt}
+                  </p>
+                  <p
+                    className="mt-1 truncate text-xs text-muted"
+                    title={task.payload ? `${ACTION_LABELS[task.action]} · ${task.payload}` : undefined}
+                  >
                     {ACTION_LABELS[task.action]}
                     {task.payload ? ` · ${task.payload}` : ""}
                   </p>
@@ -331,7 +342,7 @@ export function TaskList({ tasks, onPause, onResume, onDelete, onSave }: Props) 
                       <button
                         type="button"
                         onClick={() => void onResume(task.id)}
-                        className="rounded-md px-2 py-1.5 text-xs text-accent-soft transition hover:bg-accent/10"
+                        className="rounded-md px-2 py-1.5 text-xs text-accent-text transition hover:bg-accent/10"
                       >
                         Resume
                       </button>

@@ -5,13 +5,15 @@
 //!   * Ctrl+Shift  → circle-to-ask about what is on screen
 //!   * Ctrl+Alt    → schedule a task by voice
 //!
-//! Privacy invariant: captured audio and screenshots live in memory only. The
-//! only things written to disk are the SQLite task/settings database and the
-//! API key, which lives in the Windows Credential Manager.
+//! Voice recordings and circle-to-ask screenshots live in memory only.
+//! Clipboard history is separately opt-in and stored locally in the webview;
+//! the API key lives in Windows Credential Manager.
 
 mod actions;
+mod app_icons;
 mod audio;
 mod control;
+mod dashboard;
 mod db;
 mod gemini;
 mod hotkeys;
@@ -22,6 +24,7 @@ mod scheduler;
 mod screen;
 mod state;
 
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -46,6 +49,7 @@ const MAX_CIRCLE_HISTORY_TURNS: usize = 4;
 const CIRCLE_ABANDON: Duration = Duration::from_secs(20);
 /// The crop must be bigger than this, or the loop was a stray click.
 const CIRCLE_MIN_SIDE: u32 = 24;
+static LOADOUT_WRITE: Mutex<()> = Mutex::new(());
 
 struct InstanceMutex(HANDLE);
 
@@ -84,8 +88,9 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let handle = app.handle().clone();
+            notch::restore_taskbar();
 
-            // SQLite lives in %APPDATA%\com.murmur.desktop. Nothing else is persisted.
+            // SQLite lives in %APPDATA%\com.murmur.desktop.
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let database = db::Database::open(data_dir.join("murmur.sqlite3")).map_err(into_box)?;
@@ -120,7 +125,6 @@ pub fn run() {
             save_api_key,
             clear_api_key,
             list_tasks,
-            create_task,
             update_task,
             pause_task,
             resume_task,
@@ -137,10 +141,21 @@ pub fn run() {
             mic_status,
             get_loadout,
             save_loadout,
+            patch_loadout,
             export_loadout,
             import_loadout,
             control_snapshot,
+            dashboard_stats,
+            dashboard_resize_panel,
+            dashboard_speed_test,
+            dashboard_clipboard,
+            dashboard_copy_image,
+            dashboard_pick_files,
+            dashboard_open_path,
+            dashboard_drag_path,
             open_control_centre,
+            open_notch_peek,
+            close_notch_peek,
             open_launcher,
             close_control_centre,
             media_toggle,
@@ -148,10 +163,10 @@ pub fn run() {
             media_previous,
             set_volume,
             set_muted,
-            set_brightness,
             set_radio_enabled,
             set_dark_mode,
             set_wallpaper,
+            choose_wallpaper,
             launch_pinned_app,
             list_installed_apps,
             launch_installed_app,
@@ -168,11 +183,6 @@ pub fn run() {
     };
 
     app.run(|_handle, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
-            if let Err(err) = notch::restore_taskbars() {
-                eprintln!("[murmur] could not restore the taskbar on exit: {err:#}");
-            }
-        }
         if matches!(
             event,
             tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
@@ -193,7 +203,15 @@ fn spawn_hotkey_pipeline(app: AppHandle, bindings: Vec<hotkeys::Binding>) -> Res
     hotkeys::spawn(HotkeyConfig::new(bindings), sender)?;
 
     tauri::async_runtime::spawn(async move {
+        let mut tracker = hotkeys::GestureTracker::default();
+        let mut request: Option<tokio::task::JoinHandle<()>> = None;
         while let Some(event) = receiver.recv().await {
+            let busy = request.as_ref().is_some_and(|task| !task.is_finished())
+                || app.state::<AppState>().gesture.try_lock()
+                    .map_or(true, |owner| owner.is_some());
+            let Some(event) = tracker.filter(event, hold_to_talk(&app), busy) else {
+                continue;
+            };
             match event {
                 HotkeyEvent::State(snapshot) => {
                     if let Err(err) = app.emit(hotkeys::STATE_EVENT, snapshot) {
@@ -201,46 +219,28 @@ fn spawn_hotkey_pipeline(app: AppHandle, bindings: Vec<hotkeys::Binding>) -> Res
                     }
                 }
                 HotkeyEvent::Pressed(gesture) => {
-                    // Any chord press takes the notch back: an open Control
-                    // Centre must not sit on top of a dictation result.
-                    if notch::control_open() {
+                    if notch::panels_open() {
                         let _ = notch::set_control_open(&app, false);
                     }
-
-                    let tap_to_talk = !hold_to_talk(&app);
-                    // Tap-to-talk turns the same chord into start/stop, except
-                    // for circle-to-ask, which is a drag and always needs the
-                    // release edge to close its selection.
-                    if tap_to_talk && gesture != Gesture::CircleToAsk && is_recording(&app) {
-                        if let Err(err) = on_release(&app, gesture).await {
-                            eprintln!(
-                                "[murmur] gesture {} failed: {err:#}",
-                                gesture.listening_label()
-                            );
-                            let _ = notch::show(&app, NotchState::Error, Some(&format!("{err:#}")));
-                            notch::idle_later(app.clone(), Duration::from_millis(2600));
-                        }
-                    } else if let Err(err) = on_press(&app, gesture) {
+                    if let Err(err) = on_press(&app, gesture) {
                         eprintln!(
                             "[murmur] {} could not start recording: {err:#}",
                             gesture.label()
                         );
+                        let _ = report_error(&app, &format!("{err:#}"), 2600);
                     }
                 }
                 HotkeyEvent::Released(gesture) => {
-                    // In tap-to-talk mode the next press stops the recording,
-                    // so the key release must not send a half-length clip.
-                    if !hold_to_talk(&app) && gesture != Gesture::CircleToAsk {
-                        continue;
-                    }
-                    if let Err(err) = on_release(&app, gesture).await {
-                        eprintln!(
-                            "[murmur] gesture {} failed: {err:#}",
-                            gesture.listening_label()
-                        );
-                        let _ = notch::show(&app, NotchState::Error, Some(&format!("{err:#}")));
-                        notch::idle_later(app.clone(), Duration::from_millis(2600));
-                    }
+                    let handle = app.clone();
+                    request = Some(tokio::spawn(async move {
+                        if let Err(err) = on_release(&handle, gesture).await {
+                            eprintln!(
+                                "[murmur] gesture {} failed: {err:#}",
+                                gesture.listening_label()
+                            );
+                            let _ = report_error(&handle, &format!("{err:#}"), 2600);
+                        }
+                    }));
                 }
             }
         }
@@ -251,22 +251,38 @@ fn spawn_hotkey_pipeline(app: AppHandle, bindings: Vec<hotkeys::Binding>) -> Res
 
 /// Every gesture is voice-driven, so a press always opens a recording session.
 fn on_press(app: &AppHandle, gesture: Gesture) -> Result<()> {
-    if gesture == Gesture::CircleToAsk {
-        if let Err(err) = start_circle(app) {
-            eprintln!("[murmur] circle capture failed: {err:#}");
-            report_error(app, &format!("{err:#}"), 2600)?;
+    let state = app.state::<AppState>();
+    let mut owner = state.gesture.try_lock()
+        .map_err(|_| anyhow!("A voice request is already running"))?;
+    if owner.is_some() {
+        return Err(anyhow!("A voice gesture is already active"));
+    }
+    if let Err(err) = start_gesture(app, gesture) {
+        let _ = stop_recording(app);
+        if gesture == Gesture::CircleToAsk {
+            overlay::close(app);
+            let _ = take_circle(app);
         }
-        return Ok(());
+        return Err(err);
+    }
+    *owner = Some(gesture);
+    Ok(())
+}
+
+fn start_gesture(app: &AppHandle, gesture: Gesture) -> Result<()> {
+    if gesture == Gesture::CircleToAsk {
+        return start_circle(app);
     }
 
-    if let Err(err) = start_recording(app) {
-        // A missing or broken microphone must not break the app: report it
-        // once, in the notch and in the debug panel, and stay quiet until the
-        // next press.
-        eprintln!("[murmur] microphone unavailable: {err:#}");
-        report_error(app, &format!("Microphone unavailable — {err}"), 2600)?;
-        return Ok(());
+    if gesture == Gesture::Dictation {
+        let target = actions::foreground_window()
+            .ok_or_else(|| anyhow!("No active window for dictation"))?;
+        *app.state::<AppState>()
+            .dictation_target
+            .lock()
+            .map_err(|_| anyhow!("dictation target lock poisoned"))? = Some(target);
     }
+    start_recording(app)?;
 
     notch::show(app, NotchState::Listening, Some(gesture.listening_label()))?;
     Ok(())
@@ -297,14 +313,6 @@ fn hold_to_talk(app: &AppHandle) -> bool {
         .unwrap_or(true)
 }
 
-fn is_recording(app: &AppHandle) -> bool {
-    app.state::<AppState>()
-        .recorder
-        .lock()
-        .map(|recorder| recorder.is_recording())
-        .unwrap_or(false)
-}
-
 /// Stops the microphone if it is running. `Ok(None)` means it never started.
 fn stop_recording(app: &AppHandle) -> Result<Option<AudioClip>> {
     let state = app.state::<AppState>();
@@ -321,10 +329,33 @@ fn stop_recording(app: &AppHandle) -> Result<Option<AudioClip>> {
 }
 
 async fn on_release(app: &AppHandle, gesture: Gesture) -> Result<()> {
+    let state = app.state::<AppState>();
+    let mut owner = state.gesture.lock().await;
+    if *owner != Some(gesture) {
+        return Ok(());
+    }
+    let result = finish_recording_gesture(app, gesture).await;
+    if result.is_err() && gesture == Gesture::CircleToAsk {
+        overlay::close(app);
+        let _ = take_circle(app);
+    }
+    if gesture != Gesture::CircleToAsk
+        || state.circle.lock().map_or(true, |circle| circle.is_none())
+    {
+        *owner = None;
+    }
+    result
+}
+
+async fn finish_recording_gesture(app: &AppHandle, gesture: Gesture) -> Result<()> {
     let clip = match stop_recording(app) {
         Ok(clip) => clip,
         Err(err) => {
             eprintln!("[murmur] recording could not be completed: {err:#}");
+            if gesture == Gesture::CircleToAsk {
+                overlay::close(app);
+                let _ = take_circle(app);
+            }
             report_error(app, &format!("{err:#}"), 2600)?;
             return Ok(());
         }
@@ -353,6 +384,13 @@ async fn on_release(app: &AppHandle, gesture: Gesture) -> Result<()> {
 
     match gesture {
         Gesture::Dictation => {
+            let target = app
+                .state::<AppState>()
+                .dictation_target
+                .lock()
+                .map_err(|_| anyhow!("dictation target lock poisoned"))?
+                .take()
+                .ok_or_else(|| anyhow!("No active window for dictation"))?;
             notch::update(app, NotchState::Thinking, Some("Transcribing…"))?;
             let client = gemini::GeminiClient::from_stored_key()?;
             let voice = app
@@ -372,8 +410,20 @@ async fn on_release(app: &AppHandle, gesture: Gesture) -> Result<()> {
             // The clipboard round-trip sleeps, so keep it off the runtime.
             notch::update(app, NotchState::Thinking, Some("Inserting…"))?;
             let to_insert = transcript.clone();
-            tauri::async_runtime::spawn_blocking(move || actions::insert_text(&to_insert))
-                .await??;
+            let inserted = tauri::async_runtime::spawn_blocking(move || {
+                actions::insert_text_for_window(&to_insert, Some(target))
+            })
+            .await?;
+            if let Err(err) = inserted {
+                notch::update(
+                    app,
+                    NotchState::Answer,
+                    Some(&format!(
+                        "{err}. Copy your transcript below:\n\n{transcript}"
+                    )),
+                )?;
+                return Ok(());
+            }
 
             notch::update(app, NotchState::Answer, Some(&transcript))?;
             notch::idle_later(app.clone(), Duration::from_millis(1400));
@@ -535,6 +585,8 @@ async fn finish_or_wait_for_circle(app: &AppHandle, clip: Option<AudioClip>) -> 
 fn schedule_circle_timeout(app: AppHandle, started: Instant) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(CIRCLE_ABANDON).await;
+        let state = app.state::<AppState>();
+        let mut owner = state.gesture.lock().await;
 
         let abandoned = {
             let state = app.state::<AppState>();
@@ -555,6 +607,7 @@ fn schedule_circle_timeout(app: AppHandle, started: Instant) {
         };
 
         if abandoned.is_some() {
+            *owner = None;
             overlay::close(&app);
             let _ = notch::idle(&app);
         }
@@ -783,63 +836,6 @@ fn list_tasks(state: tauri::State<'_, AppState>) -> Result<Vec<scheduler::Schedu
 }
 
 #[tauri::command]
-fn create_task(
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
-    prompt: String,
-    due_at_ms: i64,
-    action: Option<String>,
-    payload: Option<String>,
-    recurrence: Option<String>,
-) -> Result<scheduler::ScheduledTask, String> {
-    let prompt = prompt.trim().to_string();
-    if prompt.is_empty() {
-        return Err("A task needs a prompt.".into());
-    }
-
-    let action = scheduler::ActionKind::parse(action.as_deref().unwrap_or("remind"))
-        .map_err(|err| format!("{err:#}"))?;
-    let recurrence = recurrence
-        .map(|rule| rule.trim().to_string())
-        .filter(|rule| !rule.is_empty());
-
-    let now = db::now_ms();
-    let due_at_ms = match recurrence.as_deref() {
-        Some(rule) => {
-            let parsed = scheduler::Recurrence::parse(rule).map_err(|err| format!("{err:#}"))?;
-            if due_at_ms <= now {
-                parsed
-                    .next_after_ms(now)
-                    .ok_or_else(|| "The recurrence rule has no next occurrence.".to_string())?
-            } else {
-                due_at_ms
-            }
-        }
-        None if due_at_ms <= 0 => return Err("A task needs a due time.".into()),
-        None => due_at_ms,
-    };
-
-    let payload = payload.unwrap_or_default();
-    let payload = if payload.trim().is_empty() && action == scheduler::ActionKind::Remind {
-        prompt.clone()
-    } else {
-        payload
-    };
-
-    let fields =
-        scheduler::task_fields(&prompt, action, &payload, recurrence.as_deref(), due_at_ms)
-            .map_err(|err| format!("{err:#}"))?;
-
-    let task = state
-        .db
-        .insert_task(&fields)
-        .map_err(|err| format!("{err:#}"))?;
-
-    let _ = app.emit(scheduler::TASK_DUE_EVENT, &task);
-    Ok(task)
-}
-
-#[tauri::command]
 fn update_task(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
@@ -988,10 +984,100 @@ fn notch_copy(text: String) -> Result<(), String> {
     actions::copy_text(&text).map_err(|err| format!("{err:#}"))
 }
 
+#[tauri::command]
+async fn dashboard_stats() -> Result<dashboard::Stats, String> {
+    blocking(|| Ok(dashboard::stats())).await
+}
+
+#[tauri::command]
+fn dashboard_resize_panel(app: AppHandle, panel: String) -> Result<(), String> {
+    notch::size_control_panel(&app, &panel).map_err(|err| format!("{err:#}"))
+}
+
+#[tauri::command]
+async fn dashboard_speed_test() -> Result<dashboard::SpeedResult, String> {
+    dashboard::speed_test()
+        .await
+        .map_err(|err| format!("{err:#}"))
+}
+
+#[tauri::command]
+async fn dashboard_clipboard() -> Result<dashboard::ClipboardItem, String> {
+    blocking(dashboard::clipboard).await
+}
+
+#[tauri::command]
+async fn dashboard_copy_image(data: String) -> Result<(), String> {
+    blocking(move || dashboard::copy_image(&data)).await
+}
+
+#[tauri::command]
+async fn dashboard_pick_files(folder: bool) -> Vec<String> {
+    let dialog = rfd::AsyncFileDialog::new();
+    if folder {
+        dialog
+            .pick_folder()
+            .await
+            .into_iter()
+            .map(|p| p.path().to_string_lossy().into_owned())
+            .collect()
+    } else {
+        dialog
+            .pick_files()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| p.path().to_string_lossy().into_owned())
+            .collect()
+    }
+}
+
+#[tauri::command]
+async fn dashboard_open_path(path: String) -> Result<(), String> {
+    if !std::path::Path::new(&path).exists() {
+        return Err("This item no longer exists.".into());
+    }
+    blocking(move || actions::open_app(&path)).await
+}
+
+#[tauri::command]
+async fn dashboard_drag_path(window: tauri::WebviewWindow, path: String) -> Result<(), String> {
+    let path = std::fs::canonicalize(path).map_err(|e| format!("Cannot open shelf item: {e}"))?;
+    let drag_window = window.clone();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    window
+        .run_on_main_thread(move || {
+            let image = drag::Image::Raw(include_bytes!("../icons/32x32.png").to_vec());
+            let options = drag::Options {
+                mode: drag::DragMode::Copy,
+                ..Default::default()
+            };
+            let result = drag::start_drag(
+                &drag_window,
+                drag::DragItem::Files(vec![path]),
+                image,
+                |_, _| {},
+                options,
+            )
+            .map_err(|err| format!("Cannot start drag: {err}"));
+            let _ = sender.send(result);
+        })
+        .map_err(|err| format!("Cannot start drag: {err}"))?;
+    receiver
+        .await
+        .map_err(|_| "Drag was interrupted".to_string())?
+}
+
 /// The overlay hands over the finished loop. Closing the loop ends the
 /// question, so the microphone stops here even if the keys are still held.
 #[tauri::command]
 async fn submit_circle(app: AppHandle, selection: screen::NormalizedRect) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut owner = state.gesture.lock().await;
+    if *owner != Some(Gesture::CircleToAsk) {
+        return Err("No screen question is active.".into());
+    }
+    *owner = None;
     let clip = match stop_recording(&app) {
         Ok(clip) => clip,
         Err(err) => {
@@ -1044,7 +1130,13 @@ async fn submit_circle(app: AppHandle, selection: screen::NormalizedRect) -> Res
 }
 
 #[tauri::command]
-fn cancel_circle(app: AppHandle) -> Result<(), String> {
+async fn cancel_circle(app: AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut owner = state.gesture.lock().await;
+    if *owner != Some(Gesture::CircleToAsk) {
+        return Ok(());
+    }
+    *owner = None;
     overlay::close(&app);
     let _ = take_circle(&app);
     let _ = stop_recording(&app);
@@ -1058,6 +1150,12 @@ fn start_dictation(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn stop_dictation(app: AppHandle) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    let mut owner = state.gesture.lock().await;
+    if *owner != Some(Gesture::Dictation) {
+        return Err("No test dictation is active.".into());
+    }
+    *owner = None;
     let clip = {
         let state = app.state::<AppState>();
         let mut recorder = state
@@ -1130,6 +1228,54 @@ fn save_loadout(
 }
 
 #[tauri::command]
+fn patch_loadout(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    patch: serde_json::Value,
+) -> Result<Loadout, String> {
+    let _guard = LOADOUT_WRITE
+        .lock()
+        .map_err(|_| "Loadout lock poisoned".to_string())?;
+    let current = state.db.load_loadout().map_err(|err| format!("{err:#}"))?;
+    let loadout = merge_loadout_patch(current, patch)?;
+    apply_loadout_unlocked(&app, &state.db, loadout)
+}
+
+fn merge_loadout_patch(current: Loadout, patch: serde_json::Value) -> Result<Loadout, String> {
+    let mut current = serde_json::to_value(current).map_err(|err| err.to_string())?;
+    let fields = patch.as_object().ok_or("Loadout patch must be an object")?;
+    for (key, value) in fields {
+        if !matches!(
+            key.as_str(),
+            "voice" | "hotkeys" | "persona" | "apps" | "theme"
+        ) {
+            return Err(format!("Unknown Loadout field: {key}"));
+        }
+        current[key] = value.clone();
+    }
+    serde_json::from_value(current).map_err(|err| format!("Invalid Loadout patch: {err}"))
+}
+
+#[cfg(test)]
+mod loadout_patch_tests {
+    use super::*;
+
+    #[test]
+    fn patch_preserves_other_sections_and_rejects_unknown_fields() {
+        let mut current = Loadout::default();
+        current.voice.custom = "Keep this".into();
+        let updated = merge_loadout_patch(
+            current.clone(),
+            serde_json::json!({"apps": {"pinned": ["Example"]}}),
+        )
+        .unwrap();
+        assert_eq!(updated.voice, current.voice);
+        assert_eq!(updated.apps.pinned, vec!["Example"]);
+        assert!(merge_loadout_patch(current, serde_json::json!({"unknown": true})).is_err());
+    }
+}
+
+#[tauri::command]
 fn export_loadout(state: tauri::State<'_, AppState>) -> Result<String, String> {
     let loadout = state.db.load_loadout().map_err(|err| format!("{err:#}"))?;
     serde_json::to_string_pretty(&loadout)
@@ -1148,6 +1294,17 @@ fn import_loadout(
 }
 
 fn apply_loadout(app: &AppHandle, db: &db::Database, loadout: Loadout) -> Result<Loadout, String> {
+    let _guard = LOADOUT_WRITE
+        .lock()
+        .map_err(|_| "Loadout lock poisoned".to_string())?;
+    apply_loadout_unlocked(app, db, loadout)
+}
+
+fn apply_loadout_unlocked(
+    app: &AppHandle,
+    db: &db::Database,
+    loadout: Loadout,
+) -> Result<Loadout, String> {
     let saved = db
         .save_loadout(&loadout)
         .map_err(|err| format!("{err:#}"))?;
@@ -1188,6 +1345,16 @@ fn open_control_centre(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_notch_peek(app: AppHandle) -> Result<(), String> {
+    notch::set_peek_open(&app, true).map_err(|err| format!("{err:#}"))
+}
+
+#[tauri::command]
+fn close_notch_peek(app: AppHandle) -> Result<(), String> {
+    notch::set_peek_open(&app, false).map_err(|err| format!("{err:#}"))
+}
+
+#[tauri::command]
 fn open_launcher(app: AppHandle) -> Result<(), String> {
     notch::set_launcher_open(&app).map_err(|err| format!("{err:#}"))
 }
@@ -1223,11 +1390,6 @@ async fn set_muted(muted: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn set_brightness(value: u32) -> Result<(), String> {
-    blocking(move || control::set_brightness(value)).await
-}
-
-#[tauri::command]
 async fn set_radio_enabled(kind: String, enabled: bool) -> Result<(), String> {
     let radio = match kind.as_str() {
         "wifi" => RadioKind::WiFi,
@@ -1249,6 +1411,21 @@ async fn set_wallpaper(app: AppHandle, preset: String) -> Result<(), String> {
         .app_data_dir()
         .map_err(|err| format!("Find Murmur's data directory: {err}"))?;
     blocking(move || control::set_wallpaper(&data_dir, &preset)).await
+}
+
+#[tauri::command]
+async fn choose_wallpaper() -> Result<Option<String>, String> {
+    let Some(file) = rfd::AsyncFileDialog::new()
+        .add_filter("Images", &["jpg", "jpeg", "png", "bmp"])
+        .pick_file()
+        .await
+    else {
+        return Ok(None);
+    };
+    let path = file.path().to_path_buf();
+    let display = path.to_string_lossy().into_owned();
+    blocking(move || control::set_wallpaper_file(&path)).await?;
+    Ok(Some(display))
 }
 
 #[tauri::command]
