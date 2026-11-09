@@ -358,7 +358,7 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
   }
 
   const center = 50;
-  const radius = 38;
+  const radius = 36;
   const points = SLOTS.map((slot, index) => {
     const angle = ((-90 + index * 72) * Math.PI) / 180;
     return {
@@ -414,7 +414,7 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
       </div>
 
       {/* Radial map */}
-      <div className="relative mx-auto mt-4 h-[330px] w-full max-w-[560px] select-none">
+      <div className="relative mx-auto mt-6 aspect-square w-full max-w-[500px] select-none">
         <svg
           className="absolute inset-0 h-full w-full"
           viewBox="0 0 100 100"
@@ -470,7 +470,7 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
               type="button"
               onClick={() => setSelected(point.key)}
               aria-pressed={lit}
-              className="absolute w-[118px] -translate-x-1/2 -translate-y-1/2 rounded-2xl border px-3 py-2.5 text-left transition hover:-translate-y-[calc(50%+2px)]"
+              className="absolute w-[132px] -translate-x-1/2 -translate-y-1/2 rounded-2xl border px-3.5 py-3 text-left transition hover:-translate-y-[calc(50%+2px)]"
               style={{
                 left: `${point.x}%`,
                 top: `${point.y}%`,
@@ -501,8 +501,8 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
       </div>
 
       {/* Slot editor */}
-      <div className="mt-2 rounded-2xl border border-line/80 bg-panel-raised/30 p-4">
-        <div className="flex items-start justify-between gap-3 border-b border-line/70 pb-3">
+      <div className="mt-5 rounded-2xl border border-line/80 bg-panel-raised/30 p-5">
+        <div className="flex items-start justify-between gap-3 border-b border-line/70 pb-4">
           <div className="flex items-center gap-2.5">
             <span
               className="flex h-8 w-8 items-center justify-center rounded-lg"
@@ -523,9 +523,9 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
           </span>
         </div>
 
-        <div className="pt-3">
+        <div className="pt-4">
           {selected === "voice" ? (
-            <div className="space-y-3">
+            <div className="space-y-4">
               <div className="flex flex-wrap gap-2">
                 {VOICE_STYLES.map((style) => (
                   <Chip
@@ -565,7 +565,7 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
           ) : null}
 
           {selected === "hotkeys" ? (
-            <div className="space-y-3">
+            <div className="space-y-4">
               <div className="divide-y divide-line/60">
                 <ToggleRow
                   label="Hold to talk"
@@ -702,7 +702,7 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
           ) : null}
 
           {selected === "persona" ? (
-            <div className="space-y-3">
+            <div className="space-y-4">
               <div className="flex flex-wrap gap-2">
                 {PERSONA_PRESETS.map((preset) => (
                   <Chip
@@ -745,7 +745,7 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
           ) : null}
 
           {selected === "apps" ? (
-            <div className="space-y-3">
+            <div className="space-y-4">
               <p className="text-[11px] leading-relaxed text-muted">
                 Pinned apps appear in the Control Centre and open by name. Up to 12.
               </p>
@@ -806,7 +806,7 @@ export function LoadoutSection({ loadout, onChange, onNotice }: Props) {
           ) : null}
 
           {selected === "theme" ? (
-            <div className="space-y-3">
+            <div className="space-y-4">
               <div className="flex flex-wrap gap-2">
                 {THEME_MODES.map((mode) => (
                   <Chip
